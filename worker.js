@@ -7,7 +7,6 @@ const FormData = require('form-data');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { v4: uuidv4 } = require('uuid');
 
-// R2 එකට කනෙක්ට් වෙන්න සෙටින්ග්ස්
 const s3Client = new S3Client({
   region: 'auto',
   endpoint: process.env.R2_ENDPOINT,
@@ -30,16 +29,18 @@ async function processVideo(jobData) {
   console.log(`[Job Started] ${title}`);
 
   try {
-    // 1. Video එක ඩවුන්ලෝඩ් කිරීම
+    // 1. Download Video
     console.log(`[1/4] Downloading video from: ${url}`);
     const response = await axios({ 
       url, method: 'GET', responseType: 'stream',
-      headers: { 'User-Agent': 'Mozilla/5.0' }
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
     });
     await pipeline(response.data, fs.createWriteStream(rawVideoPath));
-    console.log(`✅ Video downloaded.`);
+    
+    const stats = fs.statSync(rawVideoPath);
+    console.log(`✅ Video downloaded. Size: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
 
-    // 2. Subtitle එක ඩවුන්ලෝඩ් කිරීම
+    // 2. Download Subtitle
     let hasSubtitle = false;
     if (subtitleUrl) {
       console.log(`[2/4] Downloading subtitle...`);
@@ -51,7 +52,7 @@ async function processVideo(jobData) {
       } catch (e) { console.log(`⚠️ Subtitle failed.`); }
     }
 
-    // 3. FFmpeg Processing
+    // 3. FFmpeg Process
     console.log(`[3/4] Processing with FFmpeg...`);
     let ffmpegCmd = `ffmpeg -y -i "${rawVideoPath}" `;
     if (hasSubtitle) ffmpegCmd += `-i "${subtitlePath}" -c:v copy -c:a copy -c:s mov_text `;
@@ -66,13 +67,13 @@ async function processVideo(jobData) {
     });
     console.log(`✅ FFmpeg Processed.`);
 
-    // 4. අප්ලෝඩ් කිරීම (R2 සහ Telegram)
+    // 4. Upload (R2 & Telegram)
     console.log(`[4/4] Uploading...`);
     
-    const permanentId = uuidv4(); // අලුත් Permanent ID එකක් හදනවා
+    const permanentId = uuidv4();
     const r2Key = `videos/${permanentId}.mp4`;
 
-    // 4.1 R2 එකට අප්ලෝඩ් කිරීම
+    // 4.1 R2 Upload
     console.log(`☁️ Uploading to Cloudflare R2 as ${r2Key}...`);
     const fileStream = fs.createReadStream(outputVideoPath);
     await s3Client.send(new PutObjectCommand({
@@ -83,7 +84,7 @@ async function processVideo(jobData) {
     }));
     console.log(`✅ R2 Upload Complete!`);
 
-    // 4.2 Telegram එකට අප්ලෝඩ් කිරීම
+    // 4.2 Telegram Upload
     console.log(`✈️ Uploading to Telegram...`);
     const form = new FormData();
     form.append('chat_id', process.env.TG_CHAT_ID);
@@ -101,16 +102,18 @@ async function processVideo(jobData) {
       console.log(`❌ Telegram Upload Failed: ${tgErr.message}`);
     }
 
-    // 4.3 Cloudflare Database එකට Sync කිරීම (පසුව හදමු, දැනට ලොග් එකක් දාමු)
     console.log(`✅ [DONE] Video ready! Permanent ID: ${permanentId}`);
     
-    // Temp files මකන්න
+    // Cleanup Temp files
     fs.unlinkSync(rawVideoPath);
     fs.unlinkSync(outputVideoPath);
     if (hasSubtitle) fs.unlinkSync(subtitlePath);
 
   } catch (err) {
     console.error(`Job Failed: ${err.message}`);
+    // Cleanup on error
+    if (fs.existsSync(rawVideoPath)) fs.unlinkSync(rawVideoPath);
+    if (fs.existsSync(outputVideoPath)) fs.unlinkSync(outputVideoPath);
   }
 }
 
