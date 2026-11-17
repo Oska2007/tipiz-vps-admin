@@ -2,7 +2,20 @@ const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
-const { pipeline } = require('stream/promises'); // මේක තමයි අලුතින් එකතු කළේ
+const { pipeline } = require('stream/promises');
+const FormData = require('form-data');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { v4: uuidv4 } = require('uuid');
+
+// R2 එකට කනෙක්ට් වෙන්න සෙටින්ග්ස්
+const s3Client = new S3Client({
+  region: 'auto',
+  endpoint: process.env.R2_ENDPOINT,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+  },
+});
 
 async function processVideo(jobData) {
   const { title, url, subtitleUrl } = jobData;
@@ -20,66 +33,81 @@ async function processVideo(jobData) {
     // 1. Video එක ඩවුන්ලෝඩ් කිරීම
     console.log(`[1/4] Downloading video from: ${url}`);
     const response = await axios({ 
-      url, 
-      method: 'GET', 
-      responseType: 'stream',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      }
+      url, method: 'GET', responseType: 'stream',
+      headers: { 'User-Agent': 'Mozilla/5.0' }
     });
-    
-    const writer = fs.createWriteStream(rawVideoPath);
-    // pipeline එකෙන් ෆයිල් එක 100%ක් සේව් වෙනකම් ඉන්නවා
-    await pipeline(response.data, writer);
-    
-    const stats = fs.statSync(rawVideoPath);
-    if (stats.size === 0) throw new Error("Downloaded file is empty (0 bytes)");
-    console.log(`✅ Video downloaded successfully. Size: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+    await pipeline(response.data, fs.createWriteStream(rawVideoPath));
+    console.log(`✅ Video downloaded.`);
 
     // 2. Subtitle එක ඩවුන්ලෝඩ් කිරීම
     let hasSubtitle = false;
     if (subtitleUrl) {
       console.log(`[2/4] Downloading subtitle...`);
       try {
-        const subRes = await axios({ 
-          url: subtitleUrl, 
-          method: 'GET', 
-          responseType: 'stream',
-          headers: { 'User-Agent': 'Mozilla/5.0' }
-        });
-        const subWriter = fs.createWriteStream(subtitlePath);
-        await pipeline(subRes.data, subWriter);
+        const subRes = await axios({ url: subtitleUrl, method: 'GET', responseType: 'stream', headers: { 'User-Agent': 'Mozilla/5.0' } });
+        await pipeline(subRes.data, fs.createWriteStream(subtitlePath));
         hasSubtitle = true;
-        console.log(`✅ Subtitle downloaded successfully.`);
-      } catch (subErr) {
-        console.log(`⚠️ Subtitle download failed (${subErr.response?.status}). Continuing without subtitle...`);
-        hasSubtitle = false;
-      }
+        console.log(`✅ Subtitle downloaded.`);
+      } catch (e) { console.log(`⚠️ Subtitle failed.`); }
     }
 
-    // 3. FFmpeg හරහා Process කිරීම
-    console.log(`[3/4] Processing with FFmpeg... (This may take a while)`);
-    
+    // 3. FFmpeg Processing
+    console.log(`[3/4] Processing with FFmpeg...`);
     let ffmpegCmd = `ffmpeg -y -i "${rawVideoPath}" `;
-    
-    if (hasSubtitle) {
-      ffmpegCmd += `-i "${subtitlePath}" -c:v copy -c:a copy -c:s mov_text `;
-    } else {
-      ffmpegCmd += `-c:v copy -c:a copy `;
-    }
-    
+    if (hasSubtitle) ffmpegCmd += `-i "${subtitlePath}" -c:v copy -c:a copy -c:s mov_text `;
+    else ffmpegCmd += `-c:v copy -c:a copy `;
     ffmpegCmd += `-movflags +faststart "${outputVideoPath}"`;
 
-    exec(ffmpegCmd, (error, stdout, stderr) => {
-      if (error) {
-        console.error(`FFmpeg Error: ${error.message}`);
-        return;
-      }
-      console.log(`[4/4] ✅ Video Processed Successfully! Ready for Upload.`);
-      
-      // ටෙස්ට් කරද්දී ෆයිල් එක මකන්නේ නෑ (බලන්න පුළුවන් වෙන්න)
-      // fs.unlinkSync(rawVideoPath);
+    await new Promise((resolve, reject) => {
+      exec(ffmpegCmd, (error) => {
+        if (error) return reject(error);
+        resolve();
+      });
     });
+    console.log(`✅ FFmpeg Processed.`);
+
+    // 4. අප්ලෝඩ් කිරීම (R2 සහ Telegram)
+    console.log(`[4/4] Uploading...`);
+    
+    const permanentId = uuidv4(); // අලුත් Permanent ID එකක් හදනවා
+    const r2Key = `videos/${permanentId}.mp4`;
+
+    // 4.1 R2 එකට අප්ලෝඩ් කිරීම
+    console.log(`☁️ Uploading to Cloudflare R2 as ${r2Key}...`);
+    const fileStream = fs.createReadStream(outputVideoPath);
+    await s3Client.send(new PutObjectCommand({
+      Bucket: process.env.R2_BUCKET_NAME,
+      Key: r2Key,
+      Body: fileStream,
+      ContentType: 'video/mp4'
+    }));
+    console.log(`✅ R2 Upload Complete!`);
+
+    // 4.2 Telegram එකට අප්ලෝඩ් කිරීම
+    console.log(`✈️ Uploading to Telegram...`);
+    const form = new FormData();
+    form.append('chat_id', process.env.TG_CHAT_ID);
+    form.append('video', fs.createReadStream(outputVideoPath));
+    form.append('caption', `🎬 ${title}\nID: ${permanentId}`);
+
+    try {
+      await axios.post(`https://api.telegram.org/bot${process.env.TG_BOT_TOKEN}/sendVideo`, form, {
+        headers: form.getHeaders(),
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity
+      });
+      console.log(`✅ Telegram Upload Complete!`);
+    } catch (tgErr) {
+      console.log(`❌ Telegram Upload Failed: ${tgErr.message}`);
+    }
+
+    // 4.3 Cloudflare Database එකට Sync කිරීම (පසුව හදමු, දැනට ලොග් එකක් දාමු)
+    console.log(`✅ [DONE] Video ready! Permanent ID: ${permanentId}`);
+    
+    // Temp files මකන්න
+    fs.unlinkSync(rawVideoPath);
+    fs.unlinkSync(outputVideoPath);
+    if (hasSubtitle) fs.unlinkSync(subtitlePath);
 
   } catch (err) {
     console.error(`Job Failed: ${err.message}`);
