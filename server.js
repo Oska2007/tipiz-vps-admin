@@ -1,27 +1,28 @@
 const express = require('express');
 const path = require('path');
+const { processVideo } = require('./worker'); // අලුත් worker එක import කරගන්නවා
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// Static files (Frontend එක පෙන්නන්න)
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Test API endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    ok: true, 
-    message: 'TIPIZ VPS Admin is running!',
-    time: new Date().toISOString()
-  });
+// API: Process Direct Link
+app.post('/api/process', (req, res) => {
+  const { title, url, subtitleUrl } = req.body;
+  
+  if (!title || !url) return res.status(400).json({ error: 'Title and URL are required' });
+
+  const jobId = Date.now().toString();
+
+  // Worker එකට යවනවා (පසුබිමින් වැඩේ කරගෙන යන්න)
+  processVideo({ title, url, subtitleUrl });
+
+  res.json({ ok: true, message: 'Processing started', jobId });
 });
 
-// Server එක පටන් ගන්න
 app.listen(PORT, () => {
   console.log(`🚀 TIPIZ VPS Admin running on http://localhost:${PORT}`);
 });
