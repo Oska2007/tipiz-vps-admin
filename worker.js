@@ -20,12 +20,14 @@ async function processVideo(jobData) {
   try {
     // 1. Video එක ඩවුන්ලෝඩ් කිරීම
     console.log(`[1/4] Downloading video from: ${url}`);
-    const response = await axios({ url, method: 'GET', responseType: 'stream' });
-    const writer = fs.createWriteStream(rawVideoPath);
-    response.data.pipe(writer);
-    await new Promise((resolve, reject) => {
-      writer.on('finish', resolve);
-      writer.on('error', reject);
+    const response = await axios({ 
+      url, 
+      method: 'GET', 
+      responseType: 'stream',
+      headers: {
+        // මේක තමයි වැදගත්ම: අපි බ්‍රව්සර් එකකින් එනවා වගේ පෙන්නන්න ඕන
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      }
     });
 
     // 2. Subtitle එක ඩවුන්ලෝඩ් කිරීම (තියෙනවා නම්)
