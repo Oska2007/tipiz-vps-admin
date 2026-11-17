@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Backup — TIPIZ Admin</title>
+    <style>
+      body {
+        background: #080b14;
+        color: #e8ecf5;
+        font-family: system-ui;
+        padding: 40px;
+        text-align: center;
+      }
+      .card {
+        background: #0f1424;
+        padding: 40px;
+        border-radius: 16px;
+        border: 1px solid #1e2a4a;
+        max-width: 500px;
+        margin: 0 auto;
+      }
+      h2 {
+        color: #4f8cff;
+        margin-bottom: 20px;
+      }
+      button {
+        padding: 14px 28px;
+        background: linear-gradient(90deg, #4f8cff, #7c3aed);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-weight: bold;
+        font-size: 16px;
+        cursor: pointer;
+      }
+      button:hover {
+        opacity: 0.9;
+      }
+      .nav {
+        margin-bottom: 20px;
+        display: flex;
+        gap: 10px;
+        justify-content: center;
+      }
+      .nav a {
+        color: white;
+        text-decoration: none;
+        padding: 10px 20px;
+        background: #1e2a4a;
+        border-radius: 8px;
+      }
+      .nav a.active {
+        background: #4f8cff;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="nav">
+        <a href="/">Process Video</a>
+        <a href="/assign.html">Assign Videos</a>
+        <a href="/backup.html" class="active">Backup DB</a>
+        <a href="/logout" style="background: #ef4444">Logout</a>
+      </div>
+      <h2>Database Backup</h2>
+      <p style="color: #8b96b5; margin-bottom: 20px">
+        Download a complete JSON backup of your Cloudflare D1 Database.
+      </p>
+      <button onclick="downloadBackup()" id="btnBackup">Download Backup</button>
+      <p id="status" style="margin-top: 20px"></p>
+    </div>
+
+    <script>
+      async function downloadBackup() {
+        const btn = document.getElementById("btnBackup");
+        const status = document.getElementById("status");
+        btn.disabled = true;
+        status.textContent = "Downloading... Please wait.";
+
+        try {
+          window.location.href = "/api/backup";
+          setTimeout(() => {
+            status.textContent = "✅ Download started!";
+            btn.disabled = false;
+          }, 2000);
+        } catch (e) {
+          status.textContent = "❌ Error: " + e.message;
+          btn.disabled = false;
+        }
+      }
+    </script>
+  </body>
+</html>

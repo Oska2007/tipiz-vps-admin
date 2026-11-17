@@ -4,118 +4,160 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TIPIZ VPS Admin</title>
-    <link rel="stylesheet" href="/css/style.css" />
-    <!-- අපි පස්සේ මේක හදමු -->
     <style>
       body {
         background: #080b14;
         color: #e8ecf5;
         font-family: system-ui, sans-serif;
-        padding: 40px;
+        padding: 40px 20px;
+      }
+      .container {
+        max-width: 600px;
+        margin: 0 auto;
       }
       .card {
         background: #0f1424;
         padding: 30px;
         border-radius: 16px;
         border: 1px solid #1e2a4a;
-        max-width: 600px;
-        margin: 0 auto;
+        margin-bottom: 20px;
       }
-      input {
+      h2 {
+        color: #4f8cff;
+        margin-bottom: 20px;
+        text-align: center;
+      }
+      label {
+        display: block;
+        margin-bottom: 8px;
+        color: #8b96b5;
+        font-size: 14px;
+      }
+      input[type="text"],
+      input[type="url"],
+      input[type="file"] {
         width: 100%;
         padding: 12px;
-        margin: 10px 0;
+        margin-bottom: 20px;
         background: #0a0f1c;
         border: 1px solid #1e2a4a;
         color: white;
         border-radius: 8px;
+        box-sizing: border-box;
       }
       button {
         width: 100%;
-        padding: 12px;
-        background: #4f8cff;
+        padding: 14px;
+        background: linear-gradient(90deg, #4f8cff, #7c3aed);
         color: white;
         border: none;
         border-radius: 8px;
         font-weight: bold;
+        font-size: 16px;
         cursor: pointer;
       }
       button:hover {
-        background: #3b7bff;
+        opacity: 0.9;
       }
-      .log-box {
-        background: #000;
-        color: #0f0;
-        font-family: monospace;
-        padding: 15px;
-        height: 200px;
-        overflow-y: auto;
-        margin-top: 20px;
+      .nav {
+        text-align: center;
+        margin-bottom: 20px;
+        display: flex;
+        gap: 10px;
+        justify-content: center;
+      }
+      .nav a {
+        color: white;
+        text-decoration: none;
+        padding: 10px 20px;
+        background: #1e2a4a;
         border-radius: 8px;
-        font-size: 12px;
+      }
+      .nav a.active {
+        background: #4f8cff;
       }
     </style>
   </head>
   <body>
-    <div class="card">
-      <h2>Process New Video (Direct Link)</h2>
-      <form id="processForm">
-        <label>Video Title:</label>
-        <input
-          type="text"
-          id="title"
-          required
-          placeholder="e.g. The Dog Stars"
-        />
+    <div class="container">
+      <div class="nav">
+        <a href="/" class="active">Process New Video</a>
+        <a href="/assign.html">Assign Videos</a>
+        <a href="/backup.html">Backup DB</a>
+        <a href="/logout" style="background: #ef4444">Logout</a>
+      </div>
 
-        <label>Direct Link (MP4/MKV):</label>
-        <input
-          type="url"
-          id="url"
-          required
-          placeholder="https://example.com/video.mp4"
-        />
+      <div class="card">
+        <h2>Process New Video</h2>
+        <form id="processForm">
+          <label>Movie / Episode Title</label>
+          <input
+            type="text"
+            id="title"
+            required
+            placeholder="e.g. The Dog Stars"
+          />
 
-        <label>Subtitle Link (Optional .srt/.vtt):</label>
-        <input
-          type="url"
-          id="subtitle"
-          placeholder="https://example.com/subs.srt"
-        />
+          <label>Direct Video Link (MP4/MKV)</label>
+          <input
+            type="url"
+            id="url"
+            required
+            placeholder="https://example.com/video.mp4"
+          />
 
-        <button type="submit" id="btnSubmit">Start Processing</button>
-      </form>
+          <label>Upload Subtitle File (.srt / .vtt) - Optional</label>
+          <input type="file" id="subtitleFile" accept=".srt,.vtt" />
 
-      <h3 style="margin-top: 20px">Progress Log:</h3>
-      <div class="log-box" id="log">Ready...</div>
+          <button type="submit" id="btnSubmit">Start Processing</button>
+        </form>
+        <div
+          id="status"
+          style="
+            margin-top: 20px;
+            text-align: center;
+            color: #86efac;
+            font-weight: bold;
+          "
+        ></div>
+      </div>
     </div>
 
     <script>
       document.getElementById("processForm").onsubmit = async (e) => {
         e.preventDefault();
         const btn = document.getElementById("btnSubmit");
-        const logBox = document.getElementById("log");
+        const status = document.getElementById("status");
 
         btn.disabled = true;
-        btn.textContent = "Processing... (Check Logs)";
-        logBox.innerHTML += "<br>🚀 Sending request to server...";
+        btn.textContent = "Starting Job...";
+        status.textContent = "";
+
+        const formData = new FormData();
+        formData.append("title", document.getElementById("title").value);
+        formData.append("url", document.getElementById("url").value);
+
+        const subFile = document.getElementById("subtitleFile").files[0];
+        if (subFile) formData.append("subtitle", subFile);
 
         try {
           const res = await fetch("/api/process", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              title: document.getElementById("title").value,
-              url: document.getElementById("url").value,
-              subtitleUrl: document.getElementById("subtitle").value,
-            }),
+            body: formData,
           });
           const data = await res.json();
-          logBox.innerHTML += `<br>✅ Server started job: ${data.jobId}`;
 
-          // පස්සේ අපි මේකට Live Progress එක දාමු
+          if (data.ok) {
+            status.style.color = "#86efac";
+            status.textContent = "✅ Job started! Check VPS Logs.";
+            document.getElementById("processForm").reset();
+          } else {
+            throw new Error(data.error);
+          }
         } catch (err) {
-          logBox.innerHTML += `<br>❌ Error: ${err.message}`;
+          status.style.color = "#fca5a5";
+          status.textContent = "❌ " + err.message;
+        } finally {
           btn.disabled = false;
           btn.textContent = "Start Processing";
         }
