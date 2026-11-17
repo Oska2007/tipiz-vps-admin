@@ -30,15 +30,28 @@ async function processVideo(jobData) {
       }
     });
 
-    // 2. Subtitle එක ඩවුන්ලෝඩ් කිරීම (තියෙනවා නම්)
+      // 2. Subtitle එක ඩවුන්ලෝඩ් කිරීම (තියෙනවා නම්)
     let hasSubtitle = false;
     if (subtitleUrl) {
       console.log(`[2/4] Downloading subtitle...`);
-      const subRes = await axios({ url: subtitleUrl, method: 'GET', responseType: 'stream' });
-      const subWriter = fs.createWriteStream(subtitlePath);
-      subRes.data.pipe(subWriter);
-      await new Promise((resolve) => subWriter.on('finish', resolve));
-      hasSubtitle = true;
+      try {
+        const subRes = await axios({ 
+          url: subtitleUrl, 
+          method: 'GET', 
+          responseType: 'stream',
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          }
+        });
+        const subWriter = fs.createWriteStream(subtitlePath);
+        subRes.data.pipe(subWriter);
+        await new Promise((resolve) => subWriter.on('finish', resolve));
+        hasSubtitle = true;
+        console.log(`✅ Subtitle downloaded successfully.`);
+      } catch (subErr) {
+        console.log(`⚠️ Subtitle download failed (${subErr.response?.status}). Continuing without subtitle...`);
+        hasSubtitle = false;
+      }
     }
 
     // 3. FFmpeg හරහා Process කිරීම (Subtitle Embed + x264 Check)
