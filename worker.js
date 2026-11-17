@@ -2,14 +2,13 @@ const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const { pipeline } = require('stream/promises'); // මේක තමයි අලුතින් එකතු කළේ
 
-// මේක තමයි අපේ Background Worker එක
 async function processVideo(jobData) {
   const { title, url, subtitleUrl } = jobData;
   const tempDir = path.join(__dirname, 'temp');
   
-  // Temp folder එක නැත්නම් හදන්න
-  if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+  if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
   const rawVideoPath = path.join(tempDir, 'raw_video.mp4');
   const outputVideoPath = path.join(tempDir, 'output_x264.mp4');
@@ -25,12 +24,19 @@ async function processVideo(jobData) {
       method: 'GET', 
       responseType: 'stream',
       headers: {
-        // මේක තමයි වැදගත්ම: අපි බ්‍රව්සර් එකකින් එනවා වගේ පෙන්නන්න ඕන
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       }
     });
+    
+    const writer = fs.createWriteStream(rawVideoPath);
+    // pipeline එකෙන් ෆයිල් එක 100%ක් සේව් වෙනකම් ඉන්නවා
+    await pipeline(response.data, writer);
+    
+    const stats = fs.statSync(rawVideoPath);
+    if (stats.size === 0) throw new Error("Downloaded file is empty (0 bytes)");
+    console.log(`✅ Video downloaded successfully. Size: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
 
-      // 2. Subtitle එක ඩවුන්ලෝඩ් කිරීම (තියෙනවා නම්)
+    // 2. Subtitle එක ඩවුන්ලෝඩ් කිරීම
     let hasSubtitle = false;
     if (subtitleUrl) {
       console.log(`[2/4] Downloading subtitle...`);
@@ -39,13 +45,10 @@ async function processVideo(jobData) {
           url: subtitleUrl, 
           method: 'GET', 
           responseType: 'stream',
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-          }
+          headers: { 'User-Agent': 'Mozilla/5.0' }
         });
         const subWriter = fs.createWriteStream(subtitlePath);
-        subRes.data.pipe(subWriter);
-        await new Promise((resolve) => subWriter.on('finish', resolve));
+        await pipeline(subRes.data, subWriter);
         hasSubtitle = true;
         console.log(`✅ Subtitle downloaded successfully.`);
       } catch (subErr) {
@@ -54,13 +57,11 @@ async function processVideo(jobData) {
       }
     }
 
-    // 3. FFmpeg හරහා Process කිරීම (Subtitle Embed + x264 Check)
+    // 3. FFmpeg හරහා Process කිරීම
     console.log(`[3/4] Processing with FFmpeg... (This may take a while)`);
     
-    // FFmpeg Command එක හදමු
     let ffmpegCmd = `ffmpeg -y -i "${rawVideoPath}" `;
     
-    // Subtitle එකක් තියෙනවා නම් ඒක ඇතුළට දාන්න
     if (hasSubtitle) {
       ffmpegCmd += `-i "${subtitlePath}" -c:v copy -c:a copy -c:s mov_text `;
     } else {
@@ -76,11 +77,7 @@ async function processVideo(jobData) {
       }
       console.log(`[4/4] ✅ Video Processed Successfully! Ready for Upload.`);
       
-      // මෙතන තමයි පස්සේ අපි R2 සහ Telegram අප්ලෝඩ් කරන්නේ
-      // uploadToR2(outputVideoPath);
-      // uploadToTelegram(outputVideoPath);
-      
-      // වැඩේ ඉවර වුණාම Temp file මකන්න
+      // ටෙස්ට් කරද්දී ෆයිල් එක මකන්නේ නෑ (බලන්න පුළුවන් වෙන්න)
       // fs.unlinkSync(rawVideoPath);
     });
 
