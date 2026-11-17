@@ -122,3 +122,6 @@ async function processVideo(jobData) {
     console.error(`Job Failed: ${err.message}`);
   }
 }
+
+// ⬇️ මේ පේළිය තමයි අඩු වෙලා තිබ්බේ! ⬇️
+module.exports = { processVideo };
