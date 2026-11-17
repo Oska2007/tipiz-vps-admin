@@ -12,60 +12,20 @@
         padding: 20px;
       }
       .container {
-        max-width: 1000px;
+        max-width: 1100px;
         margin: 0 auto;
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 20px;
       }
       .card {
         background: #0f1424;
-        padding: 30px;
+        padding: 25px;
         border-radius: 16px;
         border: 1px solid #1e2a4a;
+        margin-bottom: 20px;
       }
       h2 {
         color: #4f8cff;
         margin-bottom: 20px;
         text-align: center;
-      }
-      label {
-        display: block;
-        margin-bottom: 8px;
-        color: #8b96b5;
-        font-size: 14px;
-      }
-      input[type="text"],
-      input[type="url"],
-      input[type="file"],
-      textarea {
-        width: 100%;
-        padding: 12px;
-        margin-bottom: 20px;
-        background: #0a0f1c;
-        border: 1px solid #1e2a4a;
-        color: white;
-        border-radius: 8px;
-        box-sizing: border-box;
-        font-family: inherit;
-      }
-      textarea {
-        height: 120px;
-        resize: vertical;
-      }
-      button {
-        width: 100%;
-        padding: 14px;
-        background: linear-gradient(90deg, #4f8cff, #7c3aed);
-        color: white;
-        border: none;
-        border-radius: 8px;
-        font-weight: bold;
-        font-size: 16px;
-        cursor: pointer;
-      }
-      button:hover {
-        opacity: 0.9;
       }
       .nav {
         text-align: center;
@@ -73,7 +33,6 @@
         display: flex;
         gap: 10px;
         justify-content: center;
-        grid-column: 1 / -1;
       }
       .nav a {
         color: white;
@@ -85,6 +44,72 @@
       .nav a.active {
         background: #4f8cff;
       }
+
+      /* Dynamic Row Styles */
+      .job-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr 1fr auto;
+        gap: 10px;
+        align-items: start;
+        background: #0a0f1c;
+        padding: 15px;
+        border-radius: 8px;
+        margin-bottom: 10px;
+        border: 1px solid #1e2a4a;
+      }
+      .job-row input[type="text"],
+      .job-row input[type="url"],
+      .job-row input[type="file"] {
+        width: 100%;
+        padding: 10px;
+        background: #0f1424;
+        border: 1px solid #1e2a4a;
+        color: white;
+        border-radius: 6px;
+        font-size: 13px;
+        box-sizing: border-box;
+      }
+      .job-row label {
+        font-size: 11px;
+        color: #8b96b5;
+        display: block;
+        margin-bottom: 4px;
+      }
+      .btn-remove {
+        background: #ef4444;
+        color: white;
+        border: none;
+        padding: 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-weight: bold;
+        height: 100%;
+      }
+      .btn-add {
+        background: #22c55e;
+        color: white;
+        border: none;
+        padding: 12px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-weight: bold;
+        margin-bottom: 20px;
+        width: 100%;
+        font-size: 15px;
+      }
+      .btn-submit {
+        background: linear-gradient(90deg, #4f8cff, #7c3aed);
+        color: white;
+        border: none;
+        padding: 15px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-weight: bold;
+        width: 100%;
+        font-size: 16px;
+      }
+
+      /* Progress UI */
       .job-item {
         background: #0a0f1c;
         padding: 15px;
@@ -98,7 +123,7 @@
         margin-bottom: 5px;
       }
       .job-status {
-        font-size: 12px;
+        font-size: 13px;
         color: #8b96b5;
         margin-bottom: 10px;
       }
@@ -114,10 +139,6 @@
         width: 0%;
         transition: width 0.3s;
       }
-      .job-error {
-        color: #fca5a5;
-        font-size: 12px;
-      }
     </style>
   </head>
   <body>
@@ -129,35 +150,26 @@
         <a href="/logout" style="background: #ef4444">Logout</a>
       </div>
 
-      <!-- Form Section -->
       <div class="card">
-        <h2>Add New Jobs (Max 10)</h2>
-        <form id="processForm">
-          <label>Movie / Episode Titles (One per line)</label>
-          <textarea
-            id="titles"
-            required
-            placeholder="Movie 1&#10;Movie 2&#10;Movie 3"
-          ></textarea>
+        <h2>Batch Video Processing</h2>
+        <div id="rows-container">
+          <!-- Rows will be added here by JS -->
+        </div>
 
-          <label>Direct Video Links (One per line)</label>
-          <textarea
-            id="urls"
-            required
-            placeholder="https://example.com/vid1.mp4&#10;https://example.com/vid2.mp4"
-          ></textarea>
+        <button type="button" class="btn-add" onclick="addRow()">
+          + Add Another Video (Max 10)
+        </button>
 
-          <label>Subtitle 1 (Sinhala - Default .srt/.vtt)</label>
-          <input type="file" id="subtitle1" accept=".srt,.vtt" />
-
-          <label>Subtitle 2 (English - Optional .srt/.vtt)</label>
-          <input type="file" id="subtitle2" accept=".srt,.vtt" />
-
-          <button type="submit" id="btnSubmit">Start Processing Queue</button>
-        </form>
+        <button
+          type="button"
+          class="btn-submit"
+          onclick="submitBatch()"
+          id="btnSubmit"
+        >
+          Start Processing Queue
+        </button>
       </div>
 
-      <!-- Live Progress Section -->
       <div class="card">
         <h2>Live Processing Queue</h2>
         <div id="jobsList">
@@ -167,37 +179,87 @@
     </div>
 
     <script>
-      // 1. Form Submit
-      document.getElementById("processForm").onsubmit = async (e) => {
-        e.preventDefault();
+      let rowCount = 0;
+
+      function addRow() {
+        if (rowCount >= 10)
+          return alert("Maximum 10 videos allowed per batch.");
+
+        rowCount++;
+        const container = document.getElementById("rows-container");
+        const div = document.createElement("div");
+        div.className = "job-row";
+        div.id = `row-${rowCount}`;
+        div.innerHTML = `
+        <div>
+          <label>Video Title</label>
+          <input type="text" id="title-${rowCount}" placeholder="e.g. The Dog Stars" required>
+        </div>
+        <div>
+          <label>Direct Link (MP4/MKV)</label>
+          <input type="url" id="url-${rowCount}" placeholder="https://..." required>
+        </div>
+        <div>
+          <label>Subtitle 1 (Sinhala - Default)</label>
+          <input type="file" id="sub1-${rowCount}" accept=".srt,.vtt">
+        </div>
+        <div>
+          <label>Subtitle 2 (English - Optional)</label>
+          <input type="file" id="sub2-${rowCount}" accept=".srt,.vtt">
+        </div>
+        <div style="display:flex; align-items:center; height:100%;">
+          <button type="button" class="btn-remove" onclick="removeRow(${rowCount})">X</button>
+        </div>
+      `;
+        container.appendChild(div);
+      }
+
+      function removeRow(id) {
+        const row = document.getElementById(`row-${id}`);
+        if (row) {
+          row.remove();
+          rowCount--;
+        }
+      }
+
+      async function submitBatch() {
         const btn = document.getElementById("btnSubmit");
         btn.disabled = true;
         btn.textContent = "Starting...";
 
-        const titles = document
-          .getElementById("titles")
-          .value.split("\n")
-          .filter((t) => t.trim() !== "");
-        const urls = document
-          .getElementById("urls")
-          .value.split("\n")
-          .filter((u) => u.trim() !== "");
+        const formData = new FormData();
+        let titles = [];
+        let urls = [];
+        let hasData = false;
 
-        if (titles.length !== urls.length) {
-          alert("Titles and URLs count must match!");
+        const rows = document.querySelectorAll(".job-row");
+        for (let i = 1; i <= rowCount; i++) {
+          const row = document.getElementById(`row-${i}`);
+          if (!row) continue;
+
+          const title = document.getElementById(`title-${i}`).value;
+          const url = document.getElementById(`url-${i}`).value;
+          const sub1 = document.getElementById(`sub1-${i}`).files[0];
+          const sub2 = document.getElementById(`sub2-${i}`).files[0];
+
+          if (title && url) {
+            titles.push(title);
+            urls.push(url);
+            if (sub1) formData.append(`sub1_${titles.length - 1}`, sub1);
+            if (sub2) formData.append(`sub2_${titles.length - 1}`, sub2);
+            hasData = true;
+          }
+        }
+
+        if (!hasData) {
+          alert("Please add at least one video.");
           btn.disabled = false;
           btn.textContent = "Start Processing Queue";
           return;
         }
 
-        const formData = new FormData();
         formData.append("titles", JSON.stringify(titles));
         formData.append("urls", JSON.stringify(urls));
-
-        const sub1 = document.getElementById("subtitle1").files[0];
-        const sub2 = document.getElementById("subtitle2").files[0];
-        if (sub1) formData.append("subtitle1", sub1);
-        if (sub2) formData.append("subtitle2", sub2);
 
         try {
           const res = await fetch("/api/process-batch", {
@@ -206,8 +268,10 @@
           });
           const data = await res.json();
           if (data.ok) {
-            document.getElementById("processForm").reset();
-            fetchStatus(); // Start polling
+            document.getElementById("rows-container").innerHTML = "";
+            rowCount = 0;
+            addRow(); // Add one empty row for next time
+            fetchStatus();
           } else throw new Error(data.error);
         } catch (err) {
           alert("Error: " + err.message);
@@ -215,9 +279,9 @@
           btn.disabled = false;
           btn.textContent = "Start Processing Queue";
         }
-      };
+      }
 
-      // 2. Poll Status (Live Update)
+      // Live Polling
       async function fetchStatus() {
         try {
           const res = await fetch("/api/status");
@@ -237,7 +301,6 @@
             <div class="job-title">${job.title}</div>
             <div class="job-status">${job.status}</div>
             <div class="progress-bar"><div class="progress-fill" style="width:${job.progress}%"></div></div>
-            ${job.error ? `<div class="job-error">${job.error}</div>` : ""}
           </div>
         `,
             )
@@ -247,8 +310,8 @@
         }
       }
 
-      // Poll every 3 seconds
       setInterval(fetchStatus, 3000);
+      addRow(); // Initial row
       fetchStatus();
     </script>
   </body>

@@ -31,8 +31,8 @@ async function processVideo(jobData) {
     const response = await axios({ url, method: 'GET', responseType: 'stream', headers: { 'User-Agent': 'Mozilla/5.0' } });
     await pipeline(response.data, fs.createWriteStream(rawVideoPath));
 
-    // 2. FFprobe Check (Is it already x264?)
-    updateStatus('Checking video codec...', 25);
+    // 2. FFprobe Check
+    updateStatus('Checking codec...', 25);
     let isX264 = false;
     try {
       const probe = execSync(`ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "${rawVideoPath}"`).toString().trim();
@@ -42,23 +42,29 @@ async function processVideo(jobData) {
     // 3. FFmpeg Process
     let ffmpegCmd = `ffmpeg -y -i "${rawVideoPath}" `;
     
-    // Subtitles
     if (subtitle1) ffmpegCmd += `-i "${subtitle1}" `;
     if (subtitle2) ffmpegCmd += `-i "${subtitle2}" `;
 
+    // Video & Audio mapping
+    ffmpegCmd += `-map 0:v -map 0:a `;
+    if (subtitle1) ffmpegCmd += `-map 1:0 `;
+    if (subtitle2) ffmpegCmd += `-map 2:0 `;
+
     if (isX264) {
-      updateStatus('Processing (Fast Remux + Subtitles)...', 40);
+      updateStatus('Fast Processing (Copying video)...', 40);
       ffmpegCmd += `-c:v copy -c:a copy `;
     } else {
       updateStatus('Transcoding to x264 (Slow)...', 40);
       ffmpegCmd += `-c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k `;
     }
 
+    // Subtitle Encoding & Metadata
     if (subtitle1) {
       ffmpegCmd += `-c:s mov_text -metadata:s:s:0 language=sin -metadata:s:s:0 title="Sinhala" -disposition:s:0 default `;
     }
     if (subtitle2) {
-      ffmpegCmd += `-c:s mov_text -metadata:s:s:1 language=eng -metadata:s:s:1 title="English" `;
+      const subIndex = subtitle1 ? 1 : 0;
+      ffmpegCmd += `-c:s mov_text -metadata:s:s:${subIndex} language=eng -metadata:s:s:${subIndex} title="English" `;
     }
     
     ffmpegCmd += `-movflags +faststart "${outputVideoPath}"`;
@@ -79,8 +85,9 @@ async function processVideo(jobData) {
       Bucket: process.env.R2_BUCKET_NAME, Key: r2Key, Body: fileStream, ContentType: 'video/mp4'
     }));
 
+    // 5. Telegram (with 2GB Check)
     let telegramFileId = null;
-    if (fileSizeGB < 2) {
+    if (fileSizeGB < 1.95) { // 2GB is approx 2.14GB, keeping safe margin
       updateStatus('Uploading to Telegram...', 80);
       const form = new FormData();
       form.append('chat_id', process.env.TG_CHAT_ID);
@@ -96,7 +103,7 @@ async function processVideo(jobData) {
       updateStatus('Skipping Telegram (Over 2GB limit)...', 80);
     }
 
-    // 5. Sync DB
+    // 6. Sync DB
     updateStatus('Syncing Database...', 90);
     await axios.post(`https://tipiz.moviezonee.workers.dev/api/vps/sync`, {
       uuid: permanentId, title: title, r2_key: r2Key, telegram_file_id: telegramFileId, source_type: 'r2'
@@ -111,7 +118,10 @@ async function processVideo(jobData) {
     if (subtitle2) fs.unlinkSync(subtitle2);
 
   } catch (err) {
-    updateStatus('Failed: ' + err.message, 100, true);
+    updateStatus('Failed: ' + err.message, 100);
+    // Cleanup on error
+    if (fs.existsSync(rawVideoPath)) fs.unlinkSync(rawVideoPath);
+    if (fs.existsSync(outputVideoPath)) fs.unlinkSync(outputVideoPath);
   }
 }
 

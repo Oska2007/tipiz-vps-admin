@@ -12,6 +12,7 @@ const PORT = process.env.PORT || 3000;
 const tempDir = path.join(__dirname, 'temp');
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
 
+// Multer setup (Dynamic fields)
 const upload = multer({ dest: 'temp/' });
 
 app.use(session({
@@ -39,61 +40,62 @@ app.use((req, res, next) => {
 });
 
 // ── JOB QUEUE SYSTEM ──
-let jobQueue = []; // පේළියේ ඉන්න ජොබ්ස්
-let activeJobs = {}; // ධාවනය වෙන ජොබ්ස් (UI එකට යවන්න)
+let jobQueue = []; 
+let activeJobs = {}; 
 let isProcessing = false;
 
 async function processQueue() {
   if (isProcessing || jobQueue.length === 0) return;
   isProcessing = true;
 
-  const job = jobQueue.shift(); // පළවෙනි එක ගන්නවා
+  const job = jobQueue.shift(); 
   const jobId = job.id;
-  activeJobs[jobId] = { title: job.title, status: 'Starting...', progress: 0, error: null };
+  activeJobs[jobId] = { title: job.title, status: 'Starting...', progress: 0 };
 
-  const updateStatus = (status, progress, isError = false) => {
-    activeJobs[jobId] = { title: job.title, status: status, progress: progress, error: isError ? status : null };
+  const updateStatus = (status, progress) => {
+    activeJobs[jobId] = { title: job.title, status: status, progress: progress };
   };
 
   await processVideo({ ...job, updateStatus });
 
-  // ජොබ් එක ඉවර වුණාම, ටික වෙලාවකින් ලිස්ට් එකෙන් අයින් කරන්න
   setTimeout(() => { delete activeJobs[jobId]; }, 10000); 
-
   isProcessing = false;
-  processQueue(); // ඊළඟ එක පටන් ගන්නවා
+  processQueue(); 
 }
 
-// API: Batch Process
-app.post('/api/process-batch', upload.fields([{ name: 'subtitle1', maxCount: 1 }, { name: 'subtitle2', maxCount: 1 }]), (req, res) => {
+// API: Batch Process (Accepts dynamic files)
+app.post('/api/process-batch', upload.any(), (req, res) => {
   const titles = JSON.parse(req.body.titles);
   const urls = JSON.parse(req.body.urls);
 
-  if (titles.length > 10) return res.status(400).json({ error: 'Max 10 links allowed' });
-
-  const sub1Path = req.files['subtitle1'] ? req.files['subtitle1'][0].path : null;
-  const sub2Path = req.files['subtitle2'] ? req.files['subtitle2'][0].path : null;
+  // Map files to their respective index (e.g., sub1_0, sub2_0)
+  const filesMap = {};
+  if (req.files) {
+    req.files.forEach(file => {
+      filesMap[file.fieldname] = file.path;
+    });
+  }
 
   for (let i = 0; i < titles.length; i++) {
     jobQueue.push({
       id: Date.now() + i,
       title: titles[i],
       url: urls[i],
-      subtitle1: sub1Path, // සියලුම වීඩියෝ වලට එකම සබ්ටයිටල් දෙක දානවා
-      subtitle2: sub2Path
+      subtitle1: filesMap[`sub1_${i}`] || null,
+      subtitle2: filesMap[`sub2_${i}`] || null
     });
   }
 
-  processQueue(); // පටන් ගන්නවා
-  res.json({ ok: true, message: 'Jobs added to queue' });
+  processQueue(); 
+  res.json({ ok: true, message: `${titles.length} jobs added to queue` });
 });
 
-// API: Get Status (Live Polling)
+// API: Get Status
 app.get('/api/status', (req, res) => {
   res.json(Object.values(activeJobs));
 });
 
-// ── Cloudflare Proxy Routes (Assign/Backup) ──
+// ── Cloudflare Proxy Routes ──
 const CF_URL = 'https://tipiz.moviezonee.workers.dev';
 const CF_KEY = process.env.CF_VPS_API_KEY;
 
