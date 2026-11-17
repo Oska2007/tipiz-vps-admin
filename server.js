@@ -1,7 +1,7 @@
+require('dotenv').config();
 const express = require('express');
 const path = require('path');
-const { processVideo } = require('./worker'); // අලුත් worker එක import කරගන්නවා
-require('dotenv').config();
+const { processVideo } = require('./worker');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
