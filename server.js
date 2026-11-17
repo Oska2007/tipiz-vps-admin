@@ -26,3 +26,44 @@ app.post('/api/process', (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 TIPIZ VPS Admin running on http://localhost:${PORT}`);
 });
+
+// VPS server.js එකේ පහළට
+const CF_URL = 'https://tipiz.moviezonee.workers.dev';
+const CF_KEY = process.env.CF_VPS_API_KEY;
+
+// Helper to call CF API
+async function cfFetch(path) {
+  const res = await fetch(`${CF_URL}${path}`, {
+    headers: { 'Authorization': `Bearer ${CF_KEY}` }
+  });
+  return res.json();
+}
+
+// VPS API Endpoints
+app.get('/api/cf/videos', async (req, res) => {
+  const data = await cfFetch('/api/vps/videos');
+  res.json(data);
+});
+
+app.get('/api/cf/movies', async (req, res) => {
+  const data = await cfFetch('/api/admin/movies?limit=100');
+  res.json(data);
+});
+
+app.get('/api/cf/tv', async (req, res) => {
+  const data = await cfFetch('/api/admin/tv?limit=100');
+  res.json(data);
+});
+
+app.post('/api/cf/assign', async (req, res) => {
+  const cfRes = await fetch(`${CF_URL}/api/vps/assign`, {
+    method: 'POST',
+    headers: { 
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${CF_KEY}`
+    },
+    body: JSON.stringify(req.body)
+  });
+  const data = await cfRes.json();
+  res.json(data);
+});
