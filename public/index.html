@@ -9,18 +9,20 @@
         background: #080b14;
         color: #e8ecf5;
         font-family: system-ui, sans-serif;
-        padding: 40px 20px;
+        padding: 20px;
       }
       .container {
-        max-width: 600px;
+        max-width: 1000px;
         margin: 0 auto;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
       }
       .card {
         background: #0f1424;
         padding: 30px;
         border-radius: 16px;
         border: 1px solid #1e2a4a;
-        margin-bottom: 20px;
       }
       h2 {
         color: #4f8cff;
@@ -35,7 +37,8 @@
       }
       input[type="text"],
       input[type="url"],
-      input[type="file"] {
+      input[type="file"],
+      textarea {
         width: 100%;
         padding: 12px;
         margin-bottom: 20px;
@@ -44,6 +47,11 @@
         color: white;
         border-radius: 8px;
         box-sizing: border-box;
+        font-family: inherit;
+      }
+      textarea {
+        height: 120px;
+        resize: vertical;
       }
       button {
         width: 100%;
@@ -65,6 +73,7 @@
         display: flex;
         gap: 10px;
         justify-content: center;
+        grid-column: 1 / -1;
       }
       .nav a {
         color: white;
@@ -76,92 +85,171 @@
       .nav a.active {
         background: #4f8cff;
       }
+      .job-item {
+        background: #0a0f1c;
+        padding: 15px;
+        border-radius: 8px;
+        margin-bottom: 10px;
+        border-left: 4px solid #4f8cff;
+      }
+      .job-title {
+        font-weight: bold;
+        font-size: 14px;
+        margin-bottom: 5px;
+      }
+      .job-status {
+        font-size: 12px;
+        color: #8b96b5;
+        margin-bottom: 10px;
+      }
+      .progress-bar {
+        height: 6px;
+        background: #1e2a4a;
+        border-radius: 3px;
+        overflow: hidden;
+      }
+      .progress-fill {
+        height: 100%;
+        background: #22c55e;
+        width: 0%;
+        transition: width 0.3s;
+      }
+      .job-error {
+        color: #fca5a5;
+        font-size: 12px;
+      }
     </style>
   </head>
   <body>
     <div class="container">
       <div class="nav">
-        <a href="/" class="active">Process New Video</a>
+        <a href="/" class="active">Process Videos</a>
         <a href="/assign.html">Assign Videos</a>
         <a href="/backup.html">Backup DB</a>
         <a href="/logout" style="background: #ef4444">Logout</a>
       </div>
 
+      <!-- Form Section -->
       <div class="card">
-        <h2>Process New Video</h2>
+        <h2>Add New Jobs (Max 10)</h2>
         <form id="processForm">
-          <label>Movie / Episode Title</label>
-          <input
-            type="text"
-            id="title"
+          <label>Movie / Episode Titles (One per line)</label>
+          <textarea
+            id="titles"
             required
-            placeholder="e.g. The Dog Stars"
-          />
+            placeholder="Movie 1&#10;Movie 2&#10;Movie 3"
+          ></textarea>
 
-          <label>Direct Video Link (MP4/MKV)</label>
-          <input
-            type="url"
-            id="url"
+          <label>Direct Video Links (One per line)</label>
+          <textarea
+            id="urls"
             required
-            placeholder="https://example.com/video.mp4"
-          />
+            placeholder="https://example.com/vid1.mp4&#10;https://example.com/vid2.mp4"
+          ></textarea>
 
-          <label>Upload Subtitle File (.srt / .vtt) - Optional</label>
-          <input type="file" id="subtitleFile" accept=".srt,.vtt" />
+          <label>Subtitle 1 (Sinhala - Default .srt/.vtt)</label>
+          <input type="file" id="subtitle1" accept=".srt,.vtt" />
 
-          <button type="submit" id="btnSubmit">Start Processing</button>
+          <label>Subtitle 2 (English - Optional .srt/.vtt)</label>
+          <input type="file" id="subtitle2" accept=".srt,.vtt" />
+
+          <button type="submit" id="btnSubmit">Start Processing Queue</button>
         </form>
-        <div
-          id="status"
-          style="
-            margin-top: 20px;
-            text-align: center;
-            color: #86efac;
-            font-weight: bold;
-          "
-        ></div>
+      </div>
+
+      <!-- Live Progress Section -->
+      <div class="card">
+        <h2>Live Processing Queue</h2>
+        <div id="jobsList">
+          <p style="color: #8b96b5; text-align: center">No active jobs.</p>
+        </div>
       </div>
     </div>
 
     <script>
+      // 1. Form Submit
       document.getElementById("processForm").onsubmit = async (e) => {
         e.preventDefault();
         const btn = document.getElementById("btnSubmit");
-        const status = document.getElementById("status");
-
         btn.disabled = true;
-        btn.textContent = "Starting Job...";
-        status.textContent = "";
+        btn.textContent = "Starting...";
+
+        const titles = document
+          .getElementById("titles")
+          .value.split("\n")
+          .filter((t) => t.trim() !== "");
+        const urls = document
+          .getElementById("urls")
+          .value.split("\n")
+          .filter((u) => u.trim() !== "");
+
+        if (titles.length !== urls.length) {
+          alert("Titles and URLs count must match!");
+          btn.disabled = false;
+          btn.textContent = "Start Processing Queue";
+          return;
+        }
 
         const formData = new FormData();
-        formData.append("title", document.getElementById("title").value);
-        formData.append("url", document.getElementById("url").value);
+        formData.append("titles", JSON.stringify(titles));
+        formData.append("urls", JSON.stringify(urls));
 
-        const subFile = document.getElementById("subtitleFile").files[0];
-        if (subFile) formData.append("subtitle", subFile);
+        const sub1 = document.getElementById("subtitle1").files[0];
+        const sub2 = document.getElementById("subtitle2").files[0];
+        if (sub1) formData.append("subtitle1", sub1);
+        if (sub2) formData.append("subtitle2", sub2);
 
         try {
-          const res = await fetch("/api/process", {
+          const res = await fetch("/api/process-batch", {
             method: "POST",
             body: formData,
           });
           const data = await res.json();
-
           if (data.ok) {
-            status.style.color = "#86efac";
-            status.textContent = "✅ Job started! Check VPS Logs.";
             document.getElementById("processForm").reset();
-          } else {
-            throw new Error(data.error);
-          }
+            fetchStatus(); // Start polling
+          } else throw new Error(data.error);
         } catch (err) {
-          status.style.color = "#fca5a5";
-          status.textContent = "❌ " + err.message;
+          alert("Error: " + err.message);
         } finally {
           btn.disabled = false;
-          btn.textContent = "Start Processing";
+          btn.textContent = "Start Processing Queue";
         }
       };
+
+      // 2. Poll Status (Live Update)
+      async function fetchStatus() {
+        try {
+          const res = await fetch("/api/status");
+          const jobs = await res.json();
+          const list = document.getElementById("jobsList");
+
+          if (jobs.length === 0) {
+            list.innerHTML =
+              '<p style="color:#8b96b5; text-align:center;">No active jobs.</p>';
+            return;
+          }
+
+          list.innerHTML = jobs
+            .map(
+              (job) => `
+          <div class="job-item">
+            <div class="job-title">${job.title}</div>
+            <div class="job-status">${job.status}</div>
+            <div class="progress-bar"><div class="progress-fill" style="width:${job.progress}%"></div></div>
+            ${job.error ? `<div class="job-error">${job.error}</div>` : ""}
+          </div>
+        `,
+            )
+            .join("");
+        } catch (e) {
+          console.error(e);
+        }
+      }
+
+      // Poll every 3 seconds
+      setInterval(fetchStatus, 3000);
+      fetchStatus();
     </script>
   </body>
 </html>
