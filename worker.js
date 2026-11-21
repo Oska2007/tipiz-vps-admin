@@ -95,27 +95,33 @@ async function processVideo(jobData) {
     }));
     console.log(`✅ R2 Upload Complete!`);
 
-    // 5. Telegram (with 2GB Check)
+        // 5. Telegram Upload (With Local API Server)
     let telegramFileId = null;
     if (fileSizeGB < 1.95) { 
       updateStatus('Uploading to Telegram...', 80);
-      console.log(`[5/5] Uploading to Telegram...`);
+      console.log(`[5/5] Uploading to Telegram... (Size: ${fileSizeGB.toFixed(2)} GB)`);
+      
       const form = new FormData();
       form.append('chat_id', process.env.TG_CHAT_ID);
-      form.append('video', fs.createReadStream(outputVideoPath));
+      form.append('video', fs.createReadStream(outputVideoPath)); // මේක තමයි වීඩියෝ එක යවන්නේ
       form.append('caption', `🎬 ${title}\nID: ${permanentId}`);
+
       try {
+        // මේක තමයි වැදගත්ම: api.telegram.org වෙනුවට localhost:8081 පාවිච්චි කරන්න ඕන
         const tgRes = await axios.post(`http://localhost:8081/bot${process.env.TG_BOT_TOKEN}/sendVideo`, form, {
-          headers: form.getHeaders(), maxBodyLength: Infinity, maxContentLength: Infinity
+          headers: form.getHeaders(), 
+          maxBodyLength: Infinity, 
+          maxContentLength: Infinity
         });
         telegramFileId = tgRes.data.result.video.file_id;
-        console.log(`✅ Telegram Upload Complete!`);
-      } catch (e) { console.log(`❌ TG Upload Failed: ` + e.message); }
+        console.log(`✅ Telegram Upload Complete! File ID: ${telegramFileId}`);
+      } catch (e) { 
+        console.log(`❌ TG Upload Failed: ` + (e.response?.data?.description || e.message)); 
+      }
     } else {
       updateStatus('Skipping Telegram (Over 2GB limit)...', 80);
       console.log(`⚠️ Skipping Telegram (File > 1.95GB)`);
     }
-
     // 6. Sync DB
     updateStatus('Syncing Database...', 90);
     console.log(`[Sync] Syncing Database...`);
