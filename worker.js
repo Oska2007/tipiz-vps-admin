@@ -95,19 +95,43 @@ async function processVideo(jobData) {
     }));
     console.log(`✅ R2 Upload Complete!`);
 
-        // 5. Telegram Upload (With Local API Server)
+           // 5. Telegram Upload (With Custom Thumbnail & Duration)
     let telegramFileId = null;
     if (fileSizeGB < 1.95) { 
       updateStatus('Uploading to Telegram...', 80);
       console.log(`[5/5] Uploading to Telegram... (Size: ${fileSizeGB.toFixed(2)} GB)`);
       
+      // 1. වීඩියෝ එකෙන් පොඩි පින්තූරයක් (Thumbnail) හදාගන්නවා (තත්පර 1ක තැනින්)
+      const thumbPath = path.join(tempDir, `thumb_${Date.now()}.jpg`);
+      console.log(`   -> Generating thumbnail...`);
+      await new Promise((resolve, reject) => {
+        exec(`ffmpeg -y -i "${outputVideoPath}" -ss 00:00:01 -vframes 1 -vf "scale=320:-1" "${thumbPath}"`, (err) => {
+          if (err) { console.log('Thumbnail generation failed, continuing...'); resolve(); } 
+          else resolve();
+        });
+      });
+
+      // 2. වීඩියෝ එකේ කාලය (Duration) හොයාගන්නවා
+      let duration = 0;
+      try {
+        const durationStr = execSync(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${outputVideoPath}"`).toString().trim();
+        duration = Math.round(parseFloat(durationStr));
+      } catch(e) {}
+
       const form = new FormData();
       form.append('chat_id', process.env.TG_CHAT_ID);
-      form.append('video', fs.createReadStream(outputVideoPath)); // මේක තමයි වීඩියෝ එක යවන්නේ
+      form.append('video', fs.createReadStream(outputVideoPath)); 
       form.append('caption', `🎬 ${title}\nID: ${permanentId}`);
+      
+      // Thumbnail එක සහ Duration එක Telegram එකට එවන්න
+      if (fs.existsSync(thumbPath)) {
+        form.append('thumbnail', fs.createReadStream(thumbPath));
+      }
+      if (duration > 0) {
+        form.append('duration', duration.toString());
+      }
 
       try {
-        // මේක තමයි වැදගත්ම: api.telegram.org වෙනුවට localhost:8081 පාවිච්චි කරන්න ඕන
         const tgRes = await axios.post(`http://localhost:8081/bot${process.env.TG_BOT_TOKEN}/sendVideo`, form, {
           headers: form.getHeaders(), 
           maxBodyLength: Infinity, 
@@ -117,6 +141,8 @@ async function processVideo(jobData) {
         console.log(`✅ Telegram Upload Complete! File ID: ${telegramFileId}`);
       } catch (e) { 
         console.log(`❌ TG Upload Failed: ` + (e.response?.data?.description || e.message)); 
+      } finally {
+        if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath); // ඉවර වුණාම Thumbnail එක මකන්න
       }
     } else {
       updateStatus('Skipping Telegram (Over 2GB limit)...', 80);
