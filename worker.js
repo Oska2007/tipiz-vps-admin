@@ -27,12 +27,17 @@ async function processVideo(jobData) {
 
   try {
     // 1. Download
+    console.log(`\n[Job Started] ${title}`);
     updateStatus('Downloading video...', 10);
+    console.log(`[1/5] Downloading video...`);
+    
     const response = await axios({ url, method: 'GET', responseType: 'stream', headers: { 'User-Agent': 'Mozilla/5.0' } });
     await pipeline(response.data, fs.createWriteStream(rawVideoPath));
+    console.log(`✅ Video downloaded.`);
 
     // 2. FFprobe Check
     updateStatus('Checking codec...', 25);
+    console.log(`[2/5] Checking codec...`);
     let isX264 = false;
     try {
       const probe = execSync(`ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "${rawVideoPath}"`).toString().trim();
@@ -45,26 +50,28 @@ async function processVideo(jobData) {
     if (subtitle1) ffmpegCmd += `-i "${subtitle1}" `;
     if (subtitle2) ffmpegCmd += `-i "${subtitle2}" `;
 
-    // Video & Audio mapping
     ffmpegCmd += `-map 0:v -map 0:a `;
     if (subtitle1) ffmpegCmd += `-map 1:0 `;
     if (subtitle2) ffmpegCmd += `-map 2:0 `;
 
     if (isX264) {
       updateStatus('Fast Processing (Copying video)...', 40);
+      console.log(`[3/5] Processing (Fast Copy mode)...`);
       ffmpegCmd += `-c:v copy -c:a copy `;
     } else {
       updateStatus('Transcoding to x264 (Slow)...', 40);
+      console.log(`[3/5] Transcoding to x264 (Slow mode)...`);
       ffmpegCmd += `-c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k `;
     }
 
-    // Subtitle Encoding & Metadata
     if (subtitle1) {
       ffmpegCmd += `-c:s mov_text -metadata:s:s:0 language=sin -metadata:s:s:0 title="Sinhala" -disposition:s:0 default `;
+      console.log(`   -> Embedding Sinhala Subtitle (Default)`);
     }
     if (subtitle2) {
       const subIndex = subtitle1 ? 1 : 0;
       ffmpegCmd += `-c:s mov_text -metadata:s:s:${subIndex} language=eng -metadata:s:s:${subIndex} title="English" `;
+      console.log(`   -> Embedding English Subtitle`);
     }
     
     ffmpegCmd += `-movflags +faststart "${outputVideoPath}"`;
@@ -72,9 +79,11 @@ async function processVideo(jobData) {
     await new Promise((resolve, reject) => {
       exec(ffmpegCmd, { maxBuffer: 1024 * 1024 * 100, timeout: 7200000 }, (error) => error ? reject(error) : resolve());
     });
+    console.log(`✅ FFmpeg Processed.`);
 
     // 4. Upload
     updateStatus('Uploading to R2...', 60);
+    console.log(`[4/5] Uploading to Cloudflare R2...`);
     const permanentId = uuidv4();
     const r2Key = `videos/${permanentId}.mp4`;
     const fileSize = fs.statSync(outputVideoPath).size;
@@ -84,11 +93,13 @@ async function processVideo(jobData) {
     await s3Client.send(new PutObjectCommand({
       Bucket: process.env.R2_BUCKET_NAME, Key: r2Key, Body: fileStream, ContentType: 'video/mp4'
     }));
+    console.log(`✅ R2 Upload Complete!`);
 
     // 5. Telegram (with 2GB Check)
     let telegramFileId = null;
-    if (fileSizeGB < 1.95) { // 2GB is approx 2.14GB, keeping safe margin
+    if (fileSizeGB < 1.95) { 
       updateStatus('Uploading to Telegram...', 80);
+      console.log(`[5/5] Uploading to Telegram...`);
       const form = new FormData();
       form.append('chat_id', process.env.TG_CHAT_ID);
       form.append('video', fs.createReadStream(outputVideoPath));
@@ -98,18 +109,23 @@ async function processVideo(jobData) {
           headers: form.getHeaders(), maxBodyLength: Infinity, maxContentLength: Infinity
         });
         telegramFileId = tgRes.data.result.video.file_id;
-      } catch (e) { console.log('TG Upload Failed: ' + e.message); }
+        console.log(`✅ Telegram Upload Complete!`);
+      } catch (e) { console.log(`❌ TG Upload Failed: ` + e.message); }
     } else {
       updateStatus('Skipping Telegram (Over 2GB limit)...', 80);
+      console.log(`⚠️ Skipping Telegram (File > 1.95GB)`);
     }
 
     // 6. Sync DB
     updateStatus('Syncing Database...', 90);
+    console.log(`[Sync] Syncing Database...`);
     await axios.post(`https://tipiz.moviezonee.workers.dev/api/vps/sync`, {
       uuid: permanentId, title: title, r2_key: r2Key, telegram_file_id: telegramFileId, source_type: 'r2'
     }, { headers: { 'Authorization': `Bearer ${process.env.CF_VPS_API_KEY}` } });
+    console.log(`✅ Database Sync Complete!`);
 
     updateStatus('Completed!', 100);
+    console.log(`✅ [DONE] Video ready! Permanent ID: ${permanentId}`);
     
     // Cleanup
     if (fs.existsSync(rawVideoPath)) fs.unlinkSync(rawVideoPath);
@@ -119,7 +135,7 @@ async function processVideo(jobData) {
 
   } catch (err) {
     updateStatus('Failed: ' + err.message, 100);
-    // Cleanup on error
+    console.log(`❌ Job Failed: ${err.message}`);
     if (fs.existsSync(rawVideoPath)) fs.unlinkSync(rawVideoPath);
     if (fs.existsSync(outputVideoPath)) fs.unlinkSync(outputVideoPath);
   }
