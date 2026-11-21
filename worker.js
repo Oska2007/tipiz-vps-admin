@@ -129,7 +129,7 @@ async function processVideo(jobData) {
       form.append('chat_id', process.env.TG_CHAT_ID);
       
       // මේක තමයි වැදගත්ම වෙනස්කම: video වෙනුවට document යවනවා, ඒත් streaming enable කරනවා
-      form.append('document', fs.createReadStream(outputVideoPath)); 
+      form.append('video', fs.createReadStream(outputVideoPath)); 
       form.append('caption', `🎬 ${title}\nID: ${permanentId}`);
       form.append('supports_streaming', 'true'); // මේකෙන් තමයි stream කරන්නේ
       form.append('disable_content_type_detection', 'false'); // මේකෙන් video player එක එනවා
