@@ -105,7 +105,7 @@ async function processVideo(jobData) {
       form.append('video', fs.createReadStream(outputVideoPath));
       form.append('caption', `🎬 ${title}\nID: ${permanentId}`);
       try {
-        const tgRes = await axios.post(`https://api.telegram.org/bot${process.env.TG_BOT_TOKEN}/sendVideo`, form, {
+        const tgRes = await axios.post(`http://localhost:8081/bot${process.env.TG_BOT_TOKEN}/sendVideo`, form, {
           headers: form.getHeaders(), maxBodyLength: Infinity, maxContentLength: Infinity
         });
         telegramFileId = tgRes.data.result.video.file_id;
