@@ -104,7 +104,7 @@ async function processVideo(jobData) {
     }));
     console.log(`✅ R2 Upload Complete!`);
 
-        // 5. Telegram Upload (With Custom Thumbnail & Streamable)
+        // 5. Telegram Upload (With Video Player & Streaming)
     let telegramFileId = null;
     if (fileSizeGB < 1.95) { 
       updateStatus('Uploading to Telegram...', 80);
@@ -128,11 +128,10 @@ async function processVideo(jobData) {
       const form = new FormData();
       form.append('chat_id', process.env.TG_CHAT_ID);
       
-      // මේක තමයි වැදගත්ම වෙනස්කම: video වෙනුවට document යවනවා, ඒත් streaming enable කරනවා
+      // ආයෙත් sendVideo තමයි පාවිච්චි කරන්නේ
       form.append('video', fs.createReadStream(outputVideoPath)); 
       form.append('caption', `🎬 ${title}\nID: ${permanentId}`);
-      form.append('supports_streaming', 'true'); // මේකෙන් තමයි stream කරන්නේ
-      form.append('disable_content_type_detection', 'false'); // මේකෙන් video player එක එනවා
+      form.append('supports_streaming', 'true'); // මේකෙන් stream කරන්න පුළුවන්
       
       if (fs.existsSync(thumbPath)) {
         form.append('thumbnail', fs.createReadStream(thumbPath));
@@ -142,13 +141,13 @@ async function processVideo(jobData) {
       }
 
       try {
-        // sendVideo වෙනුවට sendDocument පාවිච්චි කරනවා
-        const tgRes = await axios.post(`http://localhost:8081/bot${process.env.TG_BOT_TOKEN}/sendDocument`, form, {
+        // sendVideo එකට යවනවා
+        const tgRes = await axios.post(`http://localhost:8081/bot${process.env.TG_BOT_TOKEN}/sendVideo`, form, {
           headers: form.getHeaders(), 
           maxBodyLength: Infinity, 
           maxContentLength: Infinity
         });
-        telegramFileId = tgRes.data.result.document.file_id; // document.file_id
+        telegramFileId = tgRes.data.result.video.file_id; // video.file_id
         console.log(`✅ Telegram Upload Complete! File ID: ${telegramFileId}`);
       } catch (e) { 
         console.log(`❌ TG Upload Failed: ` + (e.response?.data?.description || e.message)); 
