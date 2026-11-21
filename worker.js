@@ -7,6 +7,7 @@ const FormData = require('form-data');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { v4: uuidv4 } = require('uuid');
 
+// R2 එකට කනෙක්ට් වෙන්න සෙටින්ග්ස්
 const s3Client = new S3Client({
   region: 'auto',
   endpoint: process.env.R2_ENDPOINT,
@@ -29,13 +30,18 @@ async function processVideo(jobData) {
     // 1. Download
     console.log(`\n[Job Started] ${title}`);
     updateStatus('Downloading video...', 10);
-    console.log(`[1/5] Downloading video...`);
+    console.log(`[1/5] Downloading video from: ${url}`);
     
-    const response = await axios({ url, method: 'GET', responseType: 'stream', headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const response = await axios({ 
+      url, method: 'GET', responseType: 'stream', 
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } 
+    });
     await pipeline(response.data, fs.createWriteStream(rawVideoPath));
-    console.log(`✅ Video downloaded.`);
+    
+    const stats = fs.statSync(rawVideoPath);
+    console.log(`✅ Video downloaded. Size: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
 
-    // 2. FFprobe Check
+    // 2. FFprobe Check (ඒක දැනටමත් x264 ද කියලා බලනවා)
     updateStatus('Checking codec...', 25);
     console.log(`[2/5] Checking codec...`);
     let isX264 = false;
@@ -81,7 +87,7 @@ async function processVideo(jobData) {
     });
     console.log(`✅ FFmpeg Processed.`);
 
-    // 4. Upload
+    // 4. Upload to R2
     updateStatus('Uploading to R2...', 60);
     console.log(`[4/5] Uploading to Cloudflare R2...`);
     const permanentId = uuidv4();
@@ -91,27 +97,29 @@ async function processVideo(jobData) {
 
     const fileStream = fs.createReadStream(outputVideoPath);
     await s3Client.send(new PutObjectCommand({
-      Bucket: process.env.R2_BUCKET_NAME, Key: r2Key, Body: fileStream, ContentType: 'video/mp4'
+      Bucket: process.env.R2_BUCKET_NAME, 
+      Key: r2Key, 
+      Body: fileStream, 
+      ContentType: 'video/mp4'
     }));
     console.log(`✅ R2 Upload Complete!`);
 
-           // 5. Telegram Upload (With Custom Thumbnail & Duration)
+    // 5. Telegram Upload (With Custom Thumbnail & Duration)
     let telegramFileId = null;
     if (fileSizeGB < 1.95) { 
       updateStatus('Uploading to Telegram...', 80);
       console.log(`[5/5] Uploading to Telegram... (Size: ${fileSizeGB.toFixed(2)} GB)`);
       
-      // 1. වීඩියෝ එකෙන් පොඩි පින්තූරයක් (Thumbnail) හදාගන්නවා (තත්පර 1ක තැනින්)
       const thumbPath = path.join(tempDir, `thumb_${Date.now()}.jpg`);
       console.log(`   -> Generating thumbnail...`);
-      await new Promise((resolve, reject) => {
-        exec(`ffmpeg -y -i "${outputVideoPath}" -ss 00:00:01 -vframes 1 -vf "scale=320:-1" "${thumbPath}"`, (err) => {
+      await new Promise((resolve) => {
+        // -ss 00:00:05: තත්පර 5ක තැනින්, scale=320:-2: පළල 320 කරලා උස ඒකට ගැලපෙන විදිහට
+        exec(`ffmpeg -y -ss 00:00:05 -i "${outputVideoPath}" -vframes 1 -vf "scale=320:-2" -q:v 5 "${thumbPath}"`, (err) => {
           if (err) { console.log('Thumbnail generation failed, continuing...'); resolve(); } 
           else resolve();
         });
       });
 
-      // 2. වීඩියෝ එකේ කාලය (Duration) හොයාගන්නවා
       let duration = 0;
       try {
         const durationStr = execSync(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${outputVideoPath}"`).toString().trim();
@@ -123,7 +131,6 @@ async function processVideo(jobData) {
       form.append('video', fs.createReadStream(outputVideoPath)); 
       form.append('caption', `🎬 ${title}\nID: ${permanentId}`);
       
-      // Thumbnail එක සහ Duration එක Telegram එකට එවන්න
       if (fs.existsSync(thumbPath)) {
         form.append('thumbnail', fs.createReadStream(thumbPath));
       }
@@ -132,6 +139,7 @@ async function processVideo(jobData) {
       }
 
       try {
+        // මේක තමයි වැදගත්ම: api.telegram.org වෙනුවට localhost:8081 පාවිච්චි කරන්න ඕන
         const tgRes = await axios.post(`http://localhost:8081/bot${process.env.TG_BOT_TOKEN}/sendVideo`, form, {
           headers: form.getHeaders(), 
           maxBodyLength: Infinity, 
@@ -142,12 +150,13 @@ async function processVideo(jobData) {
       } catch (e) { 
         console.log(`❌ TG Upload Failed: ` + (e.response?.data?.description || e.message)); 
       } finally {
-        if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath); // ඉවර වුණාම Thumbnail එක මකන්න
+        if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath);
       }
     } else {
       updateStatus('Skipping Telegram (Over 2GB limit)...', 80);
       console.log(`⚠️ Skipping Telegram (File > 1.95GB)`);
     }
+
     // 6. Sync DB
     updateStatus('Syncing Database...', 90);
     console.log(`[Sync] Syncing Database...`);
@@ -168,6 +177,7 @@ async function processVideo(jobData) {
   } catch (err) {
     updateStatus('Failed: ' + err.message, 100);
     console.log(`❌ Job Failed: ${err.message}`);
+    // Error වුණත් Temp files මකන්න
     if (fs.existsSync(rawVideoPath)) fs.unlinkSync(rawVideoPath);
     if (fs.existsSync(outputVideoPath)) fs.unlinkSync(outputVideoPath);
   }
