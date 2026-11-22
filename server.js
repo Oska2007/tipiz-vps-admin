@@ -113,16 +113,20 @@ app.post('/api/process-batch', upload.any(), (req, res) => {
     req.files.forEach(file => {
       filesMap[file.fieldname] = file.path;
       filesMap[`${file.fieldname}_name`] = file.originalname;
+      console.log(`[API] Uploaded file: ${file.fieldname} -> ${file.originalname}`);
     });
   }
 
   for (let i = 0; i < titles.length; i++) {
+    const subtitle1 = filesMap[`sub1_${i}`] || null;
+    const subtitle2 = filesMap[`sub2_${i}`] || null;
+    console.log(`[API] Job ${i + 1}: subtitle1=${subtitle1 ? 'present' : 'missing'}, subtitle2=${subtitle2 ? 'present' : 'missing'}`);
     jobQueue.push({
       id: Date.now() + i,
       title: titles[i],
       url: urls[i],
-      subtitle1: filesMap[`sub1_${i}`] || null,
-      subtitle2: filesMap[`sub2_${i}`] || null,
+      subtitle1,
+      subtitle2,
       subtitle1Name: filesMap[`sub1_${i}_name`] || null,
       subtitle2Name: filesMap[`sub2_${i}_name`] || null
     });

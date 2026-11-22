@@ -52,6 +52,7 @@ const s3Client = new S3Client({
 
 async function processVideo(jobData) {
   const { title, url, subtitle1, subtitle2, subtitle1Name, subtitle2Name, updateStatus } = jobData;
+  console.log(`[Job] ${title}: subtitle1=${subtitle1 ? `present (${subtitle1Name})` : 'missing'}, subtitle2=${subtitle2 ? `present (${subtitle2Name})` : 'missing'}`);
   const tempDir = path.join(__dirname, 'temp');
 
   if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
