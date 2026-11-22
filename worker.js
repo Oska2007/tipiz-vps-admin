@@ -193,12 +193,21 @@ async function processVideo(jobData) {
 
     // 6. Sync DB
     updateStatus('Syncing Database...', 90);
+    const r2PublicBase = process.env.R2_PUBLIC_URL
+      ? process.env.R2_PUBLIC_URL.replace(/\/$/, '')
+      : null;
     const syncResponse = await axios.post(`${process.env.CF_API_URL || 'https://tipiz.moviezonee.workers.dev'}/api/vps/sync`, {
       uuid: permanentId,
       title: title,
       r2_key: r2Key,
       subtitle1_key: subtitle1Key,
       subtitle2_key: subtitle2Key,
+      subtitle1_url: subtitle1Key && r2PublicBase ? `${r2PublicBase}/${subtitle1Key}` : null,
+      subtitle2_url: subtitle2Key && r2PublicBase ? `${r2PublicBase}/${subtitle2Key}` : null,
+      sin_subtitle_key: subtitle1Key,
+      eng_subtitle_key: subtitle2Key,
+      sinhala_subtitle_key: subtitle1Key,
+      english_subtitle_key: subtitle2Key,
       telegram_file_id: telegramFileId,
       source_type: 'r2'
     }, { headers: { 'Authorization': `Bearer ${process.env.CF_VPS_API_KEY}` } });

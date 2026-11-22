@@ -74,6 +74,7 @@ R2_ACCESS_KEY_ID=your_r2_access_key
 R2_SECRET_ACCESS_KEY=your_r2_secret_key
 R2_ENDPOINT=https://xxxxx.r2.cloudflarestorage.com
 R2_BUCKET_NAME=tipiz-media
+R2_PUBLIC_URL=https://media.your-domain.com
 
 # Telegram Settings
 TG_BOT_TOKEN=your_telegram_bot_token
