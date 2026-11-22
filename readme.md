@@ -14,8 +14,8 @@ First, update your VPS and install the required system packages (Node.js, FFmpeg
 # 1. Update system packages
 sudo apt update && sudo apt upgrade -y
 
-# 2. Install Node.js v22
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -
+# 2. Install Node.js v20
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
 sudo apt install -y nodejs
 
 # 3. Install FFmpeg (for video processing), Git, and Docker
@@ -74,7 +74,6 @@ R2_ACCESS_KEY_ID=your_r2_access_key
 R2_SECRET_ACCESS_KEY=your_r2_secret_key
 R2_ENDPOINT=https://xxxxx.r2.cloudflarestorage.com
 R2_BUCKET_NAME=tipiz-media
-R2_PUBLIC_URL=https://media.your-domain.com
 
 # Telegram Settings
 TG_BOT_TOKEN=your_telegram_bot_token
