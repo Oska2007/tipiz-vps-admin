@@ -232,24 +232,26 @@
         let hasData = false;
 
         const rows = document.querySelectorAll(".job-row");
-        for (let i = 1; i <= rowCount; i++) {
-          const row = document.getElementById(`row-${i}`);
-          if (!row) continue;
-
-          const title = document.getElementById(`title-${i}`).value;
-          const url = document.getElementById(`url-${i}`).value;
-          const sub1 = document.getElementById(`sub1-${i}`).files[0];
-          const sub2 = document.getElementById(`sub2-${i}`).files[0];
+        rows.forEach((row) => {
+          const titleInput = row.querySelector('input[type="text"]');
+          const urlInput = row.querySelector('input[type="url"]');
+          const fileInputs = row.querySelectorAll('input[type="file"]');
+          const title = titleInput?.value.trim();
+          const url = urlInput?.value.trim();
 
           if (title && url) {
             const index = titles.length;
-            titles.push(title.trim());
-            urls.push(url.trim());
-            if (sub1) formData.append(`sin_${index}`, sub1, sub1.name);
-            if (sub2) formData.append(`eng_${index}`, sub2, sub2.name);
+            titles.push(title);
+            urls.push(url);
+            if (fileInputs[0]?.files[0]) {
+              formData.append(`sin_${index}`, fileInputs[0].files[0], fileInputs[0].files[0].name);
+            }
+            if (fileInputs[1]?.files[0]) {
+              formData.append(`eng_${index}`, fileInputs[1].files[0], fileInputs[1].files[0].name);
+            }
             hasData = true;
           }
-        }
+        });
 
         if (!hasData) {
           alert("Please add at least one video.");
@@ -265,14 +267,16 @@
           const res = await fetch("/api/process-batch", {
             method: "POST",
             body: formData,
+            credentials: "same-origin",
           });
-          const data = await res.json();
+          const data = await res.json().catch(() => ({ error: "Invalid server response" }));
+          if (res.status === 401) throw new Error("Session expired. Please login again.");
           if (data.ok) {
             document.getElementById("rows-container").innerHTML = "";
             rowCount = 0;
             addRow(); // Add one empty row for next time
             fetchStatus();
-          } else throw new Error(data.error);
+          } else throw new Error(data.error || `Request failed (${res.status})`);
         } catch (err) {
           alert("Error: " + err.message);
         } finally {
