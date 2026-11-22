@@ -13,7 +13,10 @@ const tempDir = path.join(__dirname, 'temp');
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
 
 // Multer setup (Dynamic fields)
-const upload = multer({ dest: 'temp/' });
+const upload = multer({
+  dest: 'temp/',
+  limits: { fileSize: 10 * 1024 * 1024 }
+});
 
 app.use(session({
   secret: process.env.SESSION_SECRET || 'tipiz-secret',
@@ -23,21 +26,30 @@ app.use(session({
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, 'public')));
 
 // Login
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
   if (username === process.env.ADMIN_USERNAME && password === process.env.ADMIN_PASSWORD) {
-    req.session.isLoggedIn = true; res.redirect('/');
-  } else res.redirect('/login.html?error=1');
+    req.session.regenerate((err) => {
+      if (err) return res.status(500).send('Unable to create session');
+      req.session.isLoggedIn = true;
+      res.redirect('/');
+    });
+  } else {
+    res.redirect('/login.html?error=1');
+  }
 });
 app.get('/logout', (req, res) => { req.session.destroy(); res.redirect('/login.html'); });
 app.use((req, res, next) => {
-  if (req.path === '/login.html' || req.path === '/login' || req.path.startsWith('/api/')) return next();
-  if (req.session && req.session.isLoggedIn) return next();
+  if (req.path === '/login.html' || req.path === '/login' || req.path === '/logout') return next();
+  if (req.session?.isLoggedIn) return next();
+  if (req.path.startsWith('/api/')) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
   res.redirect('/login.html');
 });
+app.use(express.static(path.join(__dirname, 'public')));
 
 // ── JOB QUEUE SYSTEM ──
 let jobQueue = []; 
@@ -65,14 +77,40 @@ async function processQueue() {
 
 // API: Batch Process (Accepts dynamic files)
 app.post('/api/process-batch', upload.any(), (req, res) => {
-  const titles = JSON.parse(req.body.titles);
-  const urls = JSON.parse(req.body.urls);
+  let titles;
+  let urls;
+
+  try {
+    titles = JSON.parse(req.body.titles);
+    urls = JSON.parse(req.body.urls);
+  } catch (error) {
+    (req.files || []).forEach(file => {
+      if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+    });
+    return res.status(400).json({ error: 'Invalid batch data' });
+  }
+
+  if (
+    !Array.isArray(titles) ||
+    !Array.isArray(urls) ||
+    titles.length === 0 ||
+    titles.length !== urls.length ||
+    titles.length > 10 ||
+    titles.some(title => typeof title !== 'string' || !title.trim()) ||
+    urls.some(url => typeof url !== 'string' || !/^https?:\/\/\S+/i.test(url))
+  ) {
+    (req.files || []).forEach(file => {
+      if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+    });
+    return res.status(400).json({ error: 'Invalid or incomplete batch data' });
+  }
 
   // Map files to their respective index (e.g., sub1_0, sub2_0)
   const filesMap = {};
   if (req.files) {
     req.files.forEach(file => {
       filesMap[file.fieldname] = file.path;
+      filesMap[`${file.fieldname}_name`] = file.originalname;
     });
   }
 
@@ -82,7 +120,9 @@ app.post('/api/process-batch', upload.any(), (req, res) => {
       title: titles[i],
       url: urls[i],
       subtitle1: filesMap[`sub1_${i}`] || null,
-      subtitle2: filesMap[`sub2_${i}`] || null
+      subtitle2: filesMap[`sub2_${i}`] || null,
+      subtitle1Name: filesMap[`sub1_${i}_name`] || null,
+      subtitle2Name: filesMap[`sub2_${i}_name`] || null
     });
   }
 
@@ -96,7 +136,7 @@ app.get('/api/status', (req, res) => {
 });
 
 // ── Cloudflare Proxy Routes ──
-const CF_URL = 'https://tipiz.moviezonee.workers.dev';
+const CF_URL = process.env.CF_API_URL || 'https://tipiz.moviezonee.workers.dev';
 const CF_KEY = process.env.CF_VPS_API_KEY;
 
 async function cfFetch(path) {

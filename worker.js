@@ -7,6 +7,40 @@ const FormData = require('form-data');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { v4: uuidv4 } = require('uuid');
 
+function srtToVtt(content) {
+  let text = content.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+  if (/^WEBVTT\b/i.test(text)) return text;
+
+  text = text
+    .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2')
+    .replace(/^(\d+)\s*\n/gm, '')
+    .replace(/\n{3,}/g, '\n\n');
+
+  return `WEBVTT\n\n${text}\n`;
+}
+
+async function uploadSubtitle(s3Client, bucket, permanentId, subtitlePath, subtitleName, suffix) {
+  if (!subtitlePath || !fs.existsSync(subtitlePath)) return null;
+
+  const subtitleKey = `subtitles/${permanentId}_${suffix}.vtt`;
+  const original = fs.readFileSync(subtitlePath);
+  const originalName = subtitleName || path.basename(subtitlePath);
+  let vtt = /\.(srt)$/i.test(originalName)
+    ? srtToVtt(original.toString('utf8'))
+    : original.toString('utf8').replace(/^\uFEFF/, '').trim();
+  if (!/^WEBVTT\b/i.test(vtt)) vtt = `WEBVTT\n\n${vtt}\n`;
+
+  await s3Client.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: subtitleKey,
+    Body: Buffer.from(vtt, 'utf8'),
+    ContentType: 'text/vtt',
+    CacheControl: 'public, max-age=31536000'
+  }));
+
+  return subtitleKey;
+}
+
 const s3Client = new S3Client({
   region: 'auto',
   endpoint: process.env.R2_ENDPOINT,
@@ -17,7 +51,7 @@ const s3Client = new S3Client({
 });
 
 async function processVideo(jobData) {
-  const { title, url, subtitle1, subtitle2, updateStatus } = jobData;
+  const { title, url, subtitle1, subtitle2, subtitle1Name, subtitle2Name, updateStatus } = jobData;
   const tempDir = path.join(__dirname, 'temp');
 
   if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
@@ -83,25 +117,35 @@ async function processVideo(jobData) {
       ContentType: 'video/mp4'
     }));
 
-    // Subtitle Uploads (R2)
-    if (subtitle1 && fs.existsSync(subtitle1)) {
-      await s3Client.send(new PutObjectCommand({
-        Bucket: process.env.R2_BUCKET_NAME,
-        Key: `subtitles/${permanentId}_sin.vtt`,
-        Body: fs.createReadStream(subtitle1),
-        ContentType: 'text/vtt'
-      }));
-      console.log(`✅ Sinhala subtitle uploaded to R2.`);
+    // Subtitle Uploads (R2) - SRT is converted to valid WebVTT
+    let subtitle1Key = null;
+    let subtitle2Key = null;
+    try {
+      subtitle1Key = await uploadSubtitle(
+        s3Client,
+        process.env.R2_BUCKET_NAME,
+        permanentId,
+        subtitle1,
+        subtitle1Name,
+        'sin'
+      );
+      if (subtitle1Key) console.log(`✅ Sinhala subtitle uploaded to R2.`);
+    } catch (subtitleErr) {
+      throw new Error(`Sinhala subtitle upload failed: ${subtitleErr.message}`);
     }
 
-    if (subtitle2 && fs.existsSync(subtitle2)) {
-      await s3Client.send(new PutObjectCommand({
-        Bucket: process.env.R2_BUCKET_NAME,
-        Key: `subtitles/${permanentId}_eng.vtt`,
-        Body: fs.createReadStream(subtitle2),
-        ContentType: 'text/vtt'
-      }));
-      console.log(`✅ English subtitle uploaded to R2.`);
+    try {
+      subtitle2Key = await uploadSubtitle(
+        s3Client,
+        process.env.R2_BUCKET_NAME,
+        permanentId,
+        subtitle2,
+        subtitle2Name,
+        'eng'
+      );
+      if (subtitle2Key) console.log(`✅ English subtitle uploaded to R2.`);
+    } catch (subtitleErr) {
+      throw new Error(`English subtitle upload failed: ${subtitleErr.message}`);
     }
 
     console.log(`✅ R2 Upload Complete!`);
@@ -149,8 +193,14 @@ async function processVideo(jobData) {
 
     // 6. Sync DB
     updateStatus('Syncing Database...', 90);
-    await axios.post(`https://tipiz.moviezonee.workers.dev/api/vps/sync`, {
-      uuid: permanentId, title: title, r2_key: r2Key, telegram_file_id: telegramFileId, source_type: 'r2'
+    await axios.post(`${process.env.CF_API_URL || 'https://tipiz.moviezonee.workers.dev'}/api/vps/sync`, {
+      uuid: permanentId,
+      title: title,
+      r2_key: r2Key,
+      subtitle1_key: subtitle1Key,
+      subtitle2_key: subtitle2Key,
+      telegram_file_id: telegramFileId,
+      source_type: 'r2'
     }, { headers: { 'Authorization': `Bearer ${process.env.CF_VPS_API_KEY}` } });
     console.log(`✅ Database Sync Complete!`);
 
@@ -167,6 +217,8 @@ async function processVideo(jobData) {
     console.log(`❌ Job Failed: ${err.message}`);
     if (fs.existsSync(rawVideoPath)) fs.unlinkSync(rawVideoPath);
     if (fs.existsSync(outputVideoPath)) fs.unlinkSync(outputVideoPath);
+    if (subtitle1 && fs.existsSync(subtitle1)) fs.unlinkSync(subtitle1);
+    if (subtitle2 && fs.existsSync(subtitle2)) fs.unlinkSync(subtitle2);
   }
 }
 
