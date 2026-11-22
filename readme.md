@@ -14,8 +14,8 @@ First, update your VPS and install the required system packages (Node.js, FFmpeg
 # 1. Update system packages
 sudo apt update && sudo apt upgrade -y
 
-# 2. Install Node.js v20
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
+# 2. Install Node.js v22
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -
 sudo apt install -y nodejs
 
 # 3. Install FFmpeg (for video processing), Git, and Docker

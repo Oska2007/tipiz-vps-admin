@@ -193,7 +193,7 @@ async function processVideo(jobData) {
 
     // 6. Sync DB
     updateStatus('Syncing Database...', 90);
-    await axios.post(`${process.env.CF_API_URL || 'https://tipiz.moviezonee.workers.dev'}/api/vps/sync`, {
+    const syncResponse = await axios.post(`${process.env.CF_API_URL || 'https://tipiz.moviezonee.workers.dev'}/api/vps/sync`, {
       uuid: permanentId,
       title: title,
       r2_key: r2Key,
@@ -202,7 +202,7 @@ async function processVideo(jobData) {
       telegram_file_id: telegramFileId,
       source_type: 'r2'
     }, { headers: { 'Authorization': `Bearer ${process.env.CF_VPS_API_KEY}` } });
-    console.log(`✅ Database Sync Complete!`);
+    console.log(`✅ Database Sync Complete! Response: ${JSON.stringify(syncResponse.data)}`);
 
     updateStatus('Completed!', 100);
 

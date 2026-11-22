@@ -62,6 +62,7 @@ async function processQueue() {
 
   const job = jobQueue.shift(); 
   const jobId = job.id;
+  console.log(`[Queue] Starting job ${jobId}: ${job.title}`);
   activeJobs[jobId] = { title: job.title, status: 'Starting...', progress: 0 };
 
   const updateStatus = (status, progress) => {
@@ -77,6 +78,7 @@ async function processQueue() {
 
 // API: Batch Process (Accepts dynamic files)
 app.post('/api/process-batch', upload.any(), (req, res) => {
+  console.log(`[API] Batch request received: ${req.files?.length || 0} uploaded file(s)`);
   let titles;
   let urls;
 
