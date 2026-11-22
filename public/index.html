@@ -227,8 +227,8 @@
         btn.textContent = "Starting...";
 
         const formData = new FormData();
-        let titles = [];
-        let urls = [];
+        const titles = [];
+        const urls = [];
         let hasData = false;
 
         const rows = document.querySelectorAll(".job-row");
@@ -242,10 +242,11 @@
           const sub2 = document.getElementById(`sub2-${i}`).files[0];
 
           if (title && url) {
-            titles.push(title);
-            urls.push(url);
-            if (sub1) formData.append(`sub1_${titles.length - 1}`, sub1);
-            if (sub2) formData.append(`sub2_${titles.length - 1}`, sub2);
+            const index = titles.length;
+            titles.push(title.trim());
+            urls.push(url.trim());
+            if (sub1) formData.append(`sin_${index}`, sub1, sub1.name);
+            if (sub2) formData.append(`eng_${index}`, sub2, sub2.name);
             hasData = true;
           }
         }
