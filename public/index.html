@@ -265,24 +265,25 @@
             method: "POST",
             body: formData,
             headers: { Accept: "application/json" },
-            redirect: "manual",
           });
 
           const contentType = res.headers.get("content-type") || "";
           if (!res.ok) {
             if (contentType.includes("application/json")) {
               const data = await res.json();
+              if (res.status === 401) {
+                window.location.href = "/login.html";
+                throw new Error(data.error || "Session expired. Please log in again.");
+              }
               throw new Error(data.error || `Request failed (${res.status})`);
             }
             throw new Error(
-              res.status === 401 || res.status === 302
-                ? "Session expired. Please log in again."
-                : `Server returned an unexpected response (${res.status}).`,
+              `Server returned an unexpected response (${res.status}).`,
             );
           }
 
           if (!contentType.includes("application/json")) {
-            throw new Error("Server returned HTML instead of JSON. Please log in again.");
+            throw new Error("Server returned an unexpected response. Please refresh and try again.");
           }
 
           const data = await res.json();
@@ -314,9 +315,12 @@
         try {
           const res = await fetch("/api/status", {
             headers: { Accept: "application/json" },
-            redirect: "manual",
           });
           const contentType = res.headers.get("content-type") || "";
+          if (res.status === 401) {
+            window.location.href = "/login.html";
+            return;
+          }
           if (!res.ok || !contentType.includes("application/json")) {
             return;
           }

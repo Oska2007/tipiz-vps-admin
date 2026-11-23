@@ -37,6 +37,9 @@ app.get('/logout', (req, res) => { req.session.destroy(); res.redirect('/login.h
 app.use((req, res, next) => {
   if (req.path === '/login.html' || req.path === '/login') return next();
   if (req.session && req.session.isLoggedIn) return next();
+  if (req.path.startsWith('/api/')) {
+    return res.status(401).json({ ok: false, error: 'Your session has expired. Please log in again.' });
+  }
   res.redirect('/login.html');
 });
 
