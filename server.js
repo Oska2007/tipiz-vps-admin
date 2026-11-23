@@ -4,6 +4,7 @@ const path = require('path');
 const session = require('express-session');
 const multer = require('multer');
 const fs = require('fs');
+const { randomUUID } = require('crypto');
 const { processVideo } = require('./worker');
 
 const app = express();
@@ -12,8 +13,21 @@ const PORT = process.env.PORT || 3000;
 const tempDir = path.join(__dirname, 'temp');
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
 
-// Multer setup (Dynamic fields)
-const upload = multer({ dest: 'temp/' });
+// Keep the subtitle extension so the worker can distinguish SRT from VTT.
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: tempDir,
+    filename: (req, file, callback) => {
+      const extension = path.extname(file.originalname).toLowerCase();
+      if (extension !== '.srt' && extension !== '.vtt') {
+        const error = new Error('Subtitle files must use .srt or .vtt format.');
+        error.status = 400;
+        return callback(error);
+      }
+      callback(null, `${randomUUID()}${extension}`);
+    }
+  })
+});
 
 app.use(session({
   secret: process.env.SESSION_SECRET,
