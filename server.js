@@ -146,4 +146,17 @@ app.post('/api/cf/assign', async (req, res) => {
   res.json(await cfRes.json());
 });
 
+app.use((err, req, res, next) => {
+  console.error(err);
+
+  if (req.path.startsWith('/api/')) {
+    const message = err.code === 'LIMIT_UNEXPECTED_FILE'
+      ? 'Invalid upload field.'
+      : err.message || 'Unexpected server error.';
+    return res.status(err.status || 500).json({ ok: false, error: message });
+  }
+
+  res.status(err.status || 500).send('Unexpected server error');
+});
+
 app.listen(PORT, () => console.log(`🚀 TIPIZ VPS Admin running on http://localhost:${PORT}`));
