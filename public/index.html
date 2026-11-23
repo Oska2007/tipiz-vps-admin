@@ -179,35 +179,37 @@
 
     <script>
       let rowCount = 0;
+      let nextRowId = 1;
 
       function addRow() {
         if (rowCount >= 10)
           return alert("Maximum 10 videos allowed per batch.");
 
+        const id = nextRowId++;
         rowCount++;
         const container = document.getElementById("rows-container");
         const div = document.createElement("div");
         div.className = "job-row";
-        div.id = `row-${rowCount}`;
+        div.id = `row-${id}`;
         div.innerHTML = `
         <div>
           <label>Video Title</label>
-          <input type="text" id="title-${rowCount}" placeholder="e.g. The Dog Stars" required>
+          <input type="text" id="title-${id}" placeholder="e.g. The Dog Stars" required>
         </div>
         <div>
           <label>Direct Link (MP4/MKV)</label>
-          <input type="url" id="url-${rowCount}" placeholder="https://..." required>
+          <input type="url" id="url-${id}" placeholder="https://..." required>
         </div>
         <div>
           <label>Subtitle 1 (Sinhala - Default)</label>
-          <input type="file" id="sub1-${rowCount}" accept=".srt,.vtt">
+          <input type="file" id="sub1-${id}" accept=".srt,.vtt">
         </div>
         <div>
           <label>Subtitle 2 (English - Optional)</label>
-          <input type="file" id="sub2-${rowCount}" accept=".srt,.vtt">
+          <input type="file" id="sub2-${id}" accept=".srt,.vtt">
         </div>
         <div style="display:flex; align-items:center; height:100%;">
-          <button type="button" class="btn-remove" onclick="removeRow(${rowCount})">X</button>
+          <button type="button" class="btn-remove" onclick="removeRow(${id})">X</button>
         </div>
       `;
         container.appendChild(div);
@@ -232,14 +234,12 @@
         let hasData = false;
 
         const rows = document.querySelectorAll(".job-row");
-        for (let i = 1; i <= rowCount; i++) {
-          const row = document.getElementById(`row-${i}`);
-          if (!row) continue;
-
-          const title = document.getElementById(`title-${i}`).value;
-          const url = document.getElementById(`url-${i}`).value;
-          const sub1 = document.getElementById(`sub1-${i}`).files[0];
-          const sub2 = document.getElementById(`sub2-${i}`).files[0];
+        for (const row of rows) {
+          const id = row.id.replace("row-", "");
+          const title = document.getElementById(`title-${id}`).value.trim();
+          const url = document.getElementById(`url-${id}`).value.trim();
+          const sub1 = document.getElementById(`sub1-${id}`).files[0];
+          const sub2 = document.getElementById(`sub2-${id}`).files[0];
 
           if (title && url) {
             titles.push(title);
@@ -281,6 +281,15 @@
       }
 
       // Live Polling
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
       async function fetchStatus() {
         try {
           const res = await fetch("/api/status");
@@ -297,8 +306,8 @@
             .map(
               (job) => `
           <div class="job-item">
-            <div class="job-title">${job.title}</div>
-            <div class="job-status">${job.status}</div>
+            <div class="job-title">${escapeHtml(job.title)}</div>
+            <div class="job-status">${escapeHtml(job.status)}</div>
             <div class="progress-bar"><div class="progress-fill" style="width:${job.progress}%"></div></div>
           </div>
         `,

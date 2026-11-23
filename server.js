@@ -16,7 +16,7 @@ if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
 const upload = multer({ dest: 'temp/' });
 
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'tipiz-secret',
+  secret: process.env.SESSION_SECRET,
   resave: false, saveUninitialized: true,
   cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 }
 }));
@@ -28,13 +28,14 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Login
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
-  if (username === process.env.ADMIN_USERNAME && password === process.env.ADMIN_PASSWORD) {
+  if (process.env.ADMIN_USERNAME && process.env.ADMIN_PASSWORD &&
+      username === process.env.ADMIN_USERNAME && password === process.env.ADMIN_PASSWORD) {
     req.session.isLoggedIn = true; res.redirect('/');
   } else res.redirect('/login.html?error=1');
 });
 app.get('/logout', (req, res) => { req.session.destroy(); res.redirect('/login.html'); });
 app.use((req, res, next) => {
-  if (req.path === '/login.html' || req.path === '/login' || req.path.startsWith('/api/')) return next();
+  if (req.path === '/login.html' || req.path === '/login') return next();
   if (req.session && req.session.isLoggedIn) return next();
   res.redirect('/login.html');
 });
@@ -56,7 +57,10 @@ async function processQueue() {
     activeJobs[jobId] = { title: job.title, status: status, progress: progress };
   };
 
-  await processVideo({ ...job, updateStatus });
+  await processVideo({ ...job, updateStatus }).catch((err) => {
+    updateStatus('Failed: ' + err.message, 100);
+    console.error(`❌ Job ${jobId} failed:`, err);
+  });
 
   setTimeout(() => { delete activeJobs[jobId]; }, 10000); 
   isProcessing = false;
@@ -65,8 +69,26 @@ async function processQueue() {
 
 // API: Batch Process (Accepts dynamic files)
 app.post('/api/process-batch', upload.any(), (req, res) => {
-  const titles = JSON.parse(req.body.titles);
-  const urls = JSON.parse(req.body.urls);
+  let titles;
+  let urls;
+  try {
+    titles = JSON.parse(req.body.titles);
+    urls = JSON.parse(req.body.urls);
+  } catch {
+    return res.status(400).json({ ok: false, error: 'Invalid batch data.' });
+  }
+
+  if (!Array.isArray(titles) || !Array.isArray(urls) ||
+      titles.length === 0 || titles.length !== urls.length || titles.length > 10) {
+    return res.status(400).json({ ok: false, error: 'A batch must contain 1-10 matching titles and URLs.' });
+  }
+
+  for (let i = 0; i < titles.length; i++) {
+    if (typeof titles[i] !== 'string' || !titles[i].trim() ||
+        typeof urls[i] !== 'string' || !/^https?:\/\//i.test(urls[i])) {
+      return res.status(400).json({ ok: false, error: 'Every job requires a title and valid HTTP URL.' });
+    }
+  }
 
   // Map files to their respective index (e.g., sub1_0, sub2_0)
   const filesMap = {};
@@ -96,7 +118,7 @@ app.get('/api/status', (req, res) => {
 });
 
 // ── Cloudflare Proxy Routes ──
-const CF_URL = 'https://tipiz.moviezonee.workers.dev';
+const CF_URL = process.env.CF_API_URL || 'https://tipiz.moviezonee.workers.dev';
 const CF_KEY = process.env.CF_VPS_API_KEY;
 
 async function cfFetch(path) {

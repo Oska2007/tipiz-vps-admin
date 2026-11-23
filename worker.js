@@ -16,6 +16,46 @@ const s3Client = new S3Client({
   },
 });
 
+function escapeVttText(text) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function convertSrtToVtt(sourcePath) {
+  if (!sourcePath || path.extname(sourcePath).toLowerCase() !== '.srt') {
+    return sourcePath;
+  }
+
+  const vttPath = `${sourcePath}.vtt`;
+  let srt = fs.readFileSync(sourcePath, 'utf8').replace(/^\uFEFF/, '');
+  srt = srt.replace(/\r\n?/g, '\n').trim();
+
+  const cues = srt.split(/\n{2,}/).map((block) => {
+    const lines = block.split('\n');
+    const timingIndex = lines.findIndex((line) => /^\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s+-->/.test(line));
+    if (timingIndex === -1) return null;
+
+    const parts = lines[timingIndex].split(/\s+-->\s+/);
+    if (parts.length !== 2) return null;
+
+    const normalizeTime = (value) => value
+      .trim()
+      .replace(',', '.')
+      .replace(/(\d{2}:\d{2}:\d{2}\.\d{1,2})(?!\d)/, (match) => match.padEnd(12, '0'));
+
+    const timingParts = parts[1].split(/\s+/);
+    const timing = `${normalizeTime(parts[0])} --> ${normalizeTime(timingParts[0])}${timingParts.length > 1 ? ' ' + timingParts.slice(1).join(' ') : ''}`;
+
+    const text = escapeVttText(lines.slice(timingIndex + 1).join('\n').trim());
+    return `${timing}\n${text}`;
+  }).filter(Boolean);
+
+  fs.writeFileSync(vttPath, `WEBVTT\n\n${cues.join('\n\n')}\n`, 'utf8');
+  return vttPath;
+}
+
 async function processVideo(jobData) {
   const { title, url, subtitle1, subtitle2, updateStatus } = jobData;
   const tempDir = path.join(__dirname, 'temp');
@@ -73,6 +113,8 @@ async function processVideo(jobData) {
     const r2Key = `videos/${permanentId}.mp4`;
     const fileSize = fs.statSync(outputVideoPath).size;
     const fileSizeGB = fileSize / (1024 * 1024 * 1024);
+    const subtitle1Vtt = convertSrtToVtt(subtitle1);
+    const subtitle2Vtt = convertSrtToVtt(subtitle2);
 
     // Video Upload
     const fileStream = fs.createReadStream(outputVideoPath);
@@ -84,24 +126,24 @@ async function processVideo(jobData) {
     }));
 
     // Subtitle Uploads (R2)
-    if (subtitle1 && fs.existsSync(subtitle1)) {
+    if (subtitle1Vtt && fs.existsSync(subtitle1Vtt)) {
       await s3Client.send(new PutObjectCommand({
         Bucket: process.env.R2_BUCKET_NAME,
         Key: `subtitles/${permanentId}_sin.vtt`,
-        Body: fs.createReadStream(subtitle1),
+        Body: fs.createReadStream(subtitle1Vtt),
         ContentType: 'text/vtt'
       }));
-      console.log(`✅ Sinhala subtitle uploaded to R2.`);
+      console.log(`✅ Sinhala subtitle converted${subtitle1Vtt !== subtitle1 ? ' to VTT' : ''} and uploaded to R2.`);
     }
 
-    if (subtitle2 && fs.existsSync(subtitle2)) {
+    if (subtitle2Vtt && fs.existsSync(subtitle2Vtt)) {
       await s3Client.send(new PutObjectCommand({
         Bucket: process.env.R2_BUCKET_NAME,
         Key: `subtitles/${permanentId}_eng.vtt`,
-        Body: fs.createReadStream(subtitle2),
+        Body: fs.createReadStream(subtitle2Vtt),
         ContentType: 'text/vtt'
       }));
-      console.log(`✅ English subtitle uploaded to R2.`);
+      console.log(`✅ English subtitle converted${subtitle2Vtt !== subtitle2 ? ' to VTT' : ''} and uploaded to R2.`);
     }
 
     console.log(`✅ R2 Upload Complete!`);
@@ -149,7 +191,7 @@ async function processVideo(jobData) {
 
     // 6. Sync DB
     updateStatus('Syncing Database...', 90);
-    await axios.post(`https://tipiz.moviezonee.workers.dev/api/vps/sync`, {
+    await axios.post(`${process.env.CF_API_URL || 'https://tipiz.moviezonee.workers.dev'}/api/vps/sync`, {
       uuid: permanentId, title: title, r2_key: r2Key, telegram_file_id: telegramFileId, source_type: 'r2'
     }, { headers: { 'Authorization': `Bearer ${process.env.CF_VPS_API_KEY}` } });
     console.log(`✅ Database Sync Complete!`);
@@ -161,13 +203,17 @@ async function processVideo(jobData) {
     if (fs.existsSync(outputVideoPath)) fs.unlinkSync(outputVideoPath);
     if (subtitle1 && fs.existsSync(subtitle1)) fs.unlinkSync(subtitle1);
     if (subtitle2 && fs.existsSync(subtitle2)) fs.unlinkSync(subtitle2);
+    if (subtitle1 && subtitle1 !== subtitle1Vtt && fs.existsSync(subtitle1Vtt)) fs.unlinkSync(subtitle1Vtt);
+    if (subtitle2 && subtitle2 !== subtitle2Vtt && fs.existsSync(subtitle2Vtt)) fs.unlinkSync(subtitle2Vtt);
 
   } catch (err) {
     updateStatus('Failed: ' + err.message, 100);
     console.log(`❌ Job Failed: ${err.message}`);
     if (fs.existsSync(rawVideoPath)) fs.unlinkSync(rawVideoPath);
     if (fs.existsSync(outputVideoPath)) fs.unlinkSync(outputVideoPath);
+    if (subtitle1 && fs.existsSync(`${subtitle1}.vtt`)) fs.unlinkSync(`${subtitle1}.vtt`);
+    if (subtitle2 && fs.existsSync(`${subtitle2}.vtt`)) fs.unlinkSync(`${subtitle2}.vtt`);
   }
 }
 
-module.exports = { processVideo };
+module.exports = { processVideo, convertSrtToVtt };
