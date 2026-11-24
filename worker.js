@@ -622,7 +622,7 @@ async function processVideo(jobData) {
                     '-c:v',
                     'libx264',
                     '-preset',
-                    'ultrafast',
+                    'fast',
                     '-crf',
                     '23',
                     '-threads',
