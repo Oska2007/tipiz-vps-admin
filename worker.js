@@ -626,7 +626,7 @@ async function processVideo(jobData) {
                     '-crf',
                     '23',
                     '-threads',
-                    '1'
+                    '2'
                 );
 
             }
