@@ -1,4 +1,4 @@
-const { exec, execSync } = require('child_process');
+const { execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -16,11 +16,9 @@ const s3Client = new S3Client({
   },
 });
 
+// SRT to VTT Converter
 function escapeVttText(text) {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function convertSrtToVtt(sourcePath) {
@@ -41,8 +39,7 @@ function convertSrtToVtt(sourcePath) {
     if (parts.length !== 2) return null;
 
     const normalizeTime = (value) => value
-      .trim()
-      .replace(',', '.')
+      .trim().replace(',', '.')
       .replace(/(\d{2}:\d{2}:\d{2}\.\d{1,2})(?!\d)/, (match) => match.padEnd(12, '0'));
 
     const timingParts = parts[1].split(/\s+/);
@@ -59,7 +56,6 @@ function convertSrtToVtt(sourcePath) {
 async function processVideo(jobData) {
   const { title, url, subtitle1, subtitle2, updateStatus } = jobData;
   const tempDir = path.join(__dirname, 'temp');
-
   if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
   const rawVideoPath = path.join(tempDir, `raw_${Date.now()}.mp4`);
@@ -73,7 +69,9 @@ async function processVideo(jobData) {
 
     const response = await axios({
       url, method: 'GET', responseType: 'stream',
-      headers: { 'User-Agent': 'Mozilla/5.0' }
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity
     });
     await pipeline(response.data, fs.createWriteStream(rawVideoPath));
     console.log(`✅ Video downloaded.`);
@@ -86,28 +84,71 @@ async function processVideo(jobData) {
       isX264 = (probe === 'h264');
     } catch (e) { console.log('ffprobe failed, forcing convert.'); }
 
-    // 3. FFmpeg Process (Subtitles Embed කරන්නේ නෑ - External .vtt විදිහට යවන නිසා)
-    let ffmpegCmd = `ffmpeg -y -i "${rawVideoPath}" `;
+    // Get Video Duration for Progress
+    let duration = 0;
+    try {
+      const durationStr = execSync(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${rawVideoPath}"`).toString().trim();
+      duration = parseFloat(durationStr);
+    } catch (e) { console.log('Duration check failed.'); }
+
+    // 3. FFmpeg Process with Live Progress
+    let ffmpegArgs = [
+      '-y',
+      '-i', rawVideoPath,
+      '-progress', 'pipe:1',
+      '-movflags', '+faststart',
+      outputVideoPath
+    ];
 
     if (isX264) {
       updateStatus('Fast Processing (Copying video)...', 40);
       console.log(`[3/5] Processing (Fast Copy mode)...`);
-      ffmpegCmd += `-c:v copy -c:a copy `;
+      ffmpegArgs.splice(3, 0, '-c:v', 'copy', '-c:a', 'copy');
     } else {
       updateStatus('Transcoding to x264 (Slow)...', 40);
       console.log(`[3/5] Transcoding to x264 (Slow mode)...`);
-      ffmpegCmd += `-c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k `;
+      // Low memory flags
+      ffmpegArgs.splice(3, 0, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-threads', '1', '-c:a', 'aac', '-b:a', '128k');
     }
 
-    ffmpegCmd += `-movflags +faststart "${outputVideoPath}"`;
-
     await new Promise((resolve, reject) => {
-      exec(ffmpegCmd, { maxBuffer: 1024 * 1024 * 100, timeout: 7200000 }, (error) => error ? reject(error) : resolve());
-    });
-    console.log(`✅ FFmpeg Processed.`);
+      const ffmpeg = spawn('ffmpeg', ffmpegArgs);
+      let progressBuffer = '';
 
-    // 4. Upload to R2 (Video + Subtitles)
-    updateStatus('Uploading to R2...', 60);
+      ffmpeg.stdout.on('data', (data) => {
+        progressBuffer += data.toString();
+        const lines = progressBuffer.split('\n');
+        progressBuffer = lines.pop();
+
+        for (const line of lines) {
+          if (line.startsWith('out_time_ms=')) {
+            const timeMs = parseInt(line.split('=')[1], 10);
+            if (duration > 0) {
+              const percent = Math.min(99, (timeMs / 1000000 / duration) * 100);
+              const overallProgress = 40 + (percent * 0.4);
+              updateStatus('Processing video...', Math.round(overallProgress));
+            }
+          }
+        }
+      });
+
+      ffmpeg.stderr.on('data', (data) => {
+        const msg = data.toString();
+        if (msg.toLowerCase().includes('error')) console.error(msg);
+      });
+
+      ffmpeg.on('close', (code) => {
+        if (code === 0) {
+          console.log(`✅ FFmpeg Processed.`);
+          resolve();
+        } else {
+          reject(new Error(`FFmpeg exited with code ${code}`));
+        }
+      });
+    });
+
+    // 4. Upload to R2
+    updateStatus('Uploading to R2...', 80);
     console.log(`[4/5] Uploading to Cloudflare R2...`);
     const permanentId = uuidv4();
     const r2Key = `videos/${permanentId}.mp4`;
@@ -116,7 +157,6 @@ async function processVideo(jobData) {
     const subtitle1Vtt = convertSrtToVtt(subtitle1);
     const subtitle2Vtt = convertSrtToVtt(subtitle2);
 
-    // Video Upload
     const fileStream = fs.createReadStream(outputVideoPath);
     await s3Client.send(new PutObjectCommand({
       Bucket: process.env.R2_BUCKET_NAME,
@@ -125,7 +165,6 @@ async function processVideo(jobData) {
       ContentType: 'video/mp4'
     }));
 
-    // Subtitle Uploads (R2)
     if (subtitle1Vtt && fs.existsSync(subtitle1Vtt)) {
       await s3Client.send(new PutObjectCommand({
         Bucket: process.env.R2_BUCKET_NAME,
@@ -133,7 +172,6 @@ async function processVideo(jobData) {
         Body: fs.createReadStream(subtitle1Vtt),
         ContentType: 'text/vtt'
       }));
-      console.log(`✅ Sinhala subtitle converted${subtitle1Vtt !== subtitle1 ? ' to VTT' : ''} and uploaded to R2.`);
     }
 
     if (subtitle2Vtt && fs.existsSync(subtitle2Vtt)) {
@@ -143,27 +181,19 @@ async function processVideo(jobData) {
         Body: fs.createReadStream(subtitle2Vtt),
         ContentType: 'text/vtt'
       }));
-      console.log(`✅ English subtitle converted${subtitle2Vtt !== subtitle2 ? ' to VTT' : ''} and uploaded to R2.`);
     }
-
     console.log(`✅ R2 Upload Complete!`);
 
     // 5. Telegram Upload
     let telegramFileId = null;
     if (fileSizeGB < 1.95) {
-      updateStatus('Uploading to Telegram...', 80);
+      updateStatus('Uploading to Telegram...', 90);
       console.log(`[5/5] Uploading to Telegram...`);
 
       const thumbPath = path.join(tempDir, `thumb_${Date.now()}.jpg`);
-      await new Promise((resolve) => {
-        exec(`ffmpeg -y -ss 00:00:05 -i "${outputVideoPath}" -vframes 1 -vf "scale=320:-2" -q:v 5 "${thumbPath}"`, (err) => resolve());
-      });
-
-      let duration = 0;
       try {
-        const durationStr = execSync(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${outputVideoPath}"`).toString().trim();
-        duration = Math.round(parseFloat(durationStr));
-      } catch (e) { }
+        execSync(`ffmpeg -y -ss 00:00:05 -i "${outputVideoPath}" -vframes 1 -vf "scale=320:-2" -q:v 5 "${thumbPath}"`);
+      } catch (e) { console.log('Thumbnail generation failed.'); }
 
       const form = new FormData();
       form.append('chat_id', process.env.TG_CHAT_ID);
@@ -172,7 +202,7 @@ async function processVideo(jobData) {
       form.append('supports_streaming', 'true');
 
       if (fs.existsSync(thumbPath)) form.append('thumbnail', fs.createReadStream(thumbPath));
-      if (duration > 0) form.append('duration', duration.toString());
+      if (duration > 0) form.append('duration', Math.round(duration).toString());
 
       try {
         const tgRes = await axios.post(`http://localhost:8081/bot${process.env.TG_BOT_TOKEN}/sendVideo`, form, {
@@ -185,12 +215,10 @@ async function processVideo(jobData) {
       } finally {
         if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath);
       }
-    } else {
-      updateStatus('Skipping Telegram (Over 2GB limit)...', 80);
     }
 
     // 6. Sync DB
-    updateStatus('Syncing Database...', 90);
+    updateStatus('Syncing Database...', 95);
     await axios.post(`${process.env.CF_API_URL || 'https://tipiz.moviezonee.workers.dev'}/api/vps/sync`, {
       uuid: permanentId, title: title, r2_key: r2Key, telegram_file_id: telegramFileId, source_type: 'r2'
     }, { headers: { 'Authorization': `Bearer ${process.env.CF_VPS_API_KEY}` } });
