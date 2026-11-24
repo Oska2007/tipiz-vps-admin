@@ -1,782 +1,1107 @@
-const { execFileSync, spawn } = require('child_process');
+'use strict';
+
+const {
+    execFileSync,
+    spawn
+} = require('child_process');
+
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
-const { pipeline } = require('stream/promises');
-const FormData = require('form-data');
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
-const { v4: uuidv4 } = require('uuid');
 
-// ==========================================
-// CLOUDFLARE R2 CONFIGURATION
-// ==========================================
+const {
+    pipeline
+} = require('stream/promises');
+
+const {
+    Transform
+} = require('stream');
+
+const FormData = require('form-data');
+
+const {
+    S3Client,
+    PutObjectCommand
+} = require('@aws-sdk/client-s3');
+
+const {
+    randomUUID
+} = require('crypto');
+
+// ========================================
+// CLOUDFLARE R2
+// ========================================
 
 const s3Client = new S3Client({
-  region: 'auto',
-  endpoint: process.env.R2_ENDPOINT,
-  credentials: {
-    accessKeyId: process.env.R2_ACCESS_KEY_ID,
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
-  },
+
+    region: 'auto',
+
+    endpoint: process.env.R2_ENDPOINT,
+
+    credentials: {
+
+        accessKeyId:
+            process.env.R2_ACCESS_KEY_ID,
+
+        secretAccessKey:
+            process.env.R2_SECRET_ACCESS_KEY
+
+    }
+
 });
 
-// ==========================================
-// SRT TO VTT CONVERTER
-// ==========================================
+// ========================================
+// SUBTITLE CONVERTER
+// ========================================
 
 function escapeVttText(text) {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
 }
 
 function convertSrtToVtt(sourcePath) {
-  if (!sourcePath || path.extname(sourcePath).toLowerCase() !== '.srt') {
-    return sourcePath;
-  }
 
-  const vttPath = `${sourcePath}.vtt`;
+    if (
+        !sourcePath ||
+        path.extname(sourcePath).toLowerCase() !== '.srt'
+    ) {
+        return sourcePath;
+    }
 
-  let srt = fs.readFileSync(sourcePath, 'utf8')
-    .replace(/^\uFEFF/, '');
+    const vttPath = `${sourcePath}.vtt`;
 
-  srt = srt.replace(/\r\n?/g, '\n').trim();
+    let srt = fs.readFileSync(
+        sourcePath,
+        'utf8'
+    )
+        .replace(/^\uFEFF/, '')
+        .replace(/\r\n?/g, '\n')
+        .trim();
 
-  const cues = srt.split(/\n{2,}/).map((block) => {
-    const lines = block.split('\n');
+    const cues = srt.split(/\n{2,}/)
+        .map(block => {
 
-    const timingIndex = lines.findIndex((line) =>
-      /^\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s+-->/.test(line)
+            const lines = block.split('\n');
+
+            const index = lines.findIndex(line =>
+                /^\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s+-->/.test(line)
+            );
+
+            if (index < 0) return null;
+
+            const parts = lines[index].split(
+                /\s+-->\s+/
+            );
+
+            if (parts.length !== 2) return null;
+
+            const normalize = value =>
+                value.trim()
+                    .replace(',', '.')
+                    .replace(
+                        /(\d{2}:\d{2}:\d{2}\.\d{1,2})(?!\d)/,
+                        t => t.padEnd(12, '0')
+                    );
+
+            const endParts = parts[1].split(/\s+/);
+
+            const timing =
+                `${normalize(parts[0])} --> ` +
+                `${normalize(endParts[0])}` +
+                (
+                    endParts.length > 1
+                        ? ' ' + endParts.slice(1).join(' ')
+                        : ''
+                );
+
+            return (
+                `${timing}\n` +
+                escapeVttText(
+                    lines.slice(index + 1).join('\n').trim()
+                )
+            );
+
+        })
+        .filter(Boolean);
+
+    fs.writeFileSync(
+        vttPath,
+        `WEBVTT\n\n${cues.join('\n\n')}\n`,
+        'utf8'
     );
 
-    if (timingIndex === -1) return null;
+    return vttPath;
 
-    const parts = lines[timingIndex].split(/\s+-->\s+/);
-
-    if (parts.length !== 2) return null;
-
-    const normalizeTime = (value) => {
-      const match = value.trim().replace(',', '.');
-
-      return match.replace(
-        /(\d{2}:\d{2}:\d{2}\.\d{1,2})(?!\d)/,
-        (time) => time.padEnd(12, '0')
-      );
-    };
-
-    const timingParts = parts[1].split(/\s+/);
-
-    const timing = `${normalizeTime(parts[0])} --> ${normalizeTime(timingParts[0])}${
-      timingParts.length > 1
-        ? ' ' + timingParts.slice(1).join(' ')
-        : ''
-    }`;
-
-    const text = escapeVttText(
-      lines.slice(timingIndex + 1).join('\n').trim()
-    );
-
-    return `${timing}\n${text}`;
-  }).filter(Boolean);
-
-  fs.writeFileSync(
-    vttPath,
-    `WEBVTT\n\n${cues.join('\n\n')}\n`,
-    'utf8'
-  );
-
-  return vttPath;
 }
 
-// ==========================================
-// FFPROBE INFORMATION
-// ==========================================
+// ========================================
+// VIDEO INFORMATION
+// ========================================
 
 function getVideoInfo(filePath) {
-  const result = execFileSync('ffprobe', [
-    '-v', 'error',
-    '-show_entries',
-    'format=format_name,duration:stream=index,codec_type,codec_name,profile',
-    '-of', 'json',
-    filePath
-  ], {
-    encoding: 'utf8',
-    maxBuffer: 10 * 1024 * 1024
-  });
 
-  return JSON.parse(result);
+    const result = execFileSync(
+
+        'ffprobe',
+
+        [
+            '-v',
+            'error',
+
+            '-show_entries',
+
+            'format=format_name,duration:stream=index,codec_type,codec_name,profile',
+
+            '-of',
+            'json',
+
+            filePath
+        ],
+
+        {
+            encoding: 'utf8',
+            maxBuffer: 10 * 1024 * 1024
+        }
+
+    );
+
+    return JSON.parse(result);
+
 }
 
-// ==========================================
-// FFMPEG PROCESS WITH PROGRESS
-// ==========================================
+// ========================================
+// FFMPEG PROGRESS
+// ========================================
 
-function runFFmpeg(args, duration, updateStatus) {
-  return new Promise((resolve, reject) => {
+function runFFmpeg(
+    args,
+    duration,
+    updateStatus,
+    label
+) {
 
-    const ffmpeg = spawn('ffmpeg', args);
+    return new Promise((resolve, reject) => {
 
-    let progressBuffer = '';
-    let errorBuffer = '';
-
-    ffmpeg.stdout.on('data', (data) => {
-
-      progressBuffer += data.toString();
-
-      const lines = progressBuffer.split('\n');
-
-      progressBuffer = lines.pop();
-
-      for (const line of lines) {
-
-        if (line.startsWith('out_time_ms=')) {
-
-          const timeMs = parseInt(line.split('=')[1], 10);
-
-          if (duration > 0 && Number.isFinite(timeMs)) {
-
-            const percent = Math.min(
-              99,
-              (timeMs / 1000000 / duration) * 100
-            );
-
-            const overallProgress = 40 + (percent * 0.4);
-
-            updateStatus(
-              'Processing video...',
-              Math.round(overallProgress)
-            );
-          }
-        }
-      }
-    });
-
-    ffmpeg.stderr.on('data', (data) => {
-
-      const msg = data.toString();
-
-      errorBuffer += msg;
-
-      if (errorBuffer.length > 20000) {
-        errorBuffer = errorBuffer.slice(-20000);
-      }
-
-      if (msg.toLowerCase().includes('error')) {
-        console.error(msg);
-      }
-    });
-
-    ffmpeg.on('error', reject);
-
-    ffmpeg.on('close', (code) => {
-
-      if (code === 0) {
-
-        console.log('FFmpeg processing completed.');
-
-        resolve();
-
-      } else {
-
-        reject(
-          new Error(
-            `FFmpeg exited with code ${code}: ${errorBuffer.slice(-3000)}`
-          )
+        const ffmpeg = spawn(
+            'ffmpeg',
+            args,
+            {
+                stdio: [
+                    'ignore',
+                    'pipe',
+                    'pipe'
+                ]
+            }
         );
 
-      }
+        let progressBuffer = '';
+        let errorBuffer = '';
+
+        ffmpeg.stdout.on('data', data => {
+
+            progressBuffer += data.toString();
+
+            const lines = progressBuffer.split('\n');
+
+            progressBuffer = lines.pop();
+
+            for (const line of lines) {
+
+                if (!line.startsWith('out_time_ms=')) {
+                    continue;
+                }
+
+                const value = Number(
+                    line.slice('out_time_ms='.length)
+                );
+
+                if (
+                    duration > 0 &&
+                    Number.isFinite(value)
+                ) {
+
+                    const fraction = Math.max(
+                        0,
+                        Math.min(
+                            1,
+                            value / 1000000 / duration
+                        )
+                    );
+
+                    updateStatus(
+                        label,
+                        30 + fraction * 35,
+                        {
+                            detail:
+                                `${Math.round(fraction * 100)}% of video timeline`
+                        }
+                    );
+
+                }
+
+            }
+
+        });
+
+        ffmpeg.stderr.on('data', data => {
+
+            errorBuffer += data.toString();
+
+            if (errorBuffer.length > 12000) {
+                errorBuffer = errorBuffer.slice(-12000);
+            }
+
+        });
+
+        ffmpeg.on('error', reject);
+
+        ffmpeg.on('close', code => {
+
+            if (code === 0) {
+                resolve();
+            } else {
+
+                reject(
+                    new Error(
+                        `FFmpeg exited with code ${code}: ` +
+                        errorBuffer.slice(-2500)
+                    )
+                );
+
+            }
+
+        });
+
     });
 
-  });
 }
 
-// ==========================================
-// MAIN VIDEO PROCESSING
-// ==========================================
+// ========================================
+// STREAM PROGRESS
+// ========================================
+
+function makeProgressTransform(total, onProgress) {
+
+    let loaded = 0;
+
+    return new Transform({
+
+        transform(chunk, enc, cb) {
+
+            loaded += chunk.length;
+
+            onProgress(
+                loaded,
+                total || null
+            );
+
+            cb(null, chunk);
+
+        }
+
+    });
+
+}
+
+// ========================================
+// R2 UPLOAD
+// ========================================
+
+async function uploadR2(
+    filePath,
+    key,
+    contentType,
+    onProgress
+) {
+
+    const size = fs.statSync(filePath).size;
+
+    let loaded = 0;
+
+    let lastAt = Date.now();
+    let lastLoaded = 0;
+
+    const meter = new Transform({
+
+        transform(chunk, enc, cb) {
+
+            loaded += chunk.length;
+
+            const now = Date.now();
+
+            const speed =
+                now - lastAt >= 1000
+                    ? (
+                        (loaded - lastLoaded) /
+                        ((now - lastAt) / 1000)
+                    )
+                    : null;
+
+            onProgress(
+                loaded,
+                size,
+                speed
+            );
+
+            if (now - lastAt >= 1000) {
+
+                lastAt = now;
+                lastLoaded = loaded;
+
+            }
+
+            cb(null, chunk);
+
+        }
+
+    });
+
+    await s3Client.send(
+
+        new PutObjectCommand({
+
+            Bucket: process.env.R2_BUCKET_NAME,
+
+            Key: key,
+
+            Body: fs.createReadStream(filePath).pipe(meter),
+
+            ContentLength: size,
+
+            ContentType: contentType
+
+        })
+
+    );
+
+    onProgress(size, size, 0);
+
+}
+
+// ========================================
+// MAIN PROCESS
+// ========================================
 
 async function processVideo(jobData) {
 
-  const {
-    title,
-    url,
-    subtitle1,
-    subtitle2,
-    updateStatus
-  } = jobData;
+    const {
+        title,
+        url,
+        subtitle1,
+        subtitle2
+    } = jobData;
 
-  const tempDir = path.join(__dirname, 'temp');
+    const updateStatus =
+        typeof jobData.updateStatus === 'function'
+            ? jobData.updateStatus
+            : () => {};
 
-  if (!fs.existsSync(tempDir)) {
-    fs.mkdirSync(tempDir, { recursive: true });
-  }
+    const tempDir = path.join(
+        __dirname,
+        'temp'
+    );
 
-  const jobId = uuidv4();
-
-  const rawVideoPath = path.join(
-    tempDir,
-    `raw_${jobId}.mp4`
-  );
-
-  const outputVideoPath = path.join(
-    tempDir,
-    `out_${jobId}.mp4`
-  );
-
-  const thumbPath = path.join(
-    tempDir,
-    `thumb_${jobId}.jpg`
-  );
-
-  let subtitle1Vtt = null;
-  let subtitle2Vtt = null;
-
-  let permanentId = null;
-  let telegramFileId = null;
-
-  try {
-
-    // ==========================================
-    // 1. DOWNLOAD VIDEO
-    // ==========================================
-
-    console.log(`\n[Job Started] ${title}`);
-
-    updateStatus('Downloading video...', 10);
-
-    console.log(`[1/5] Downloading: ${url}`);
-
-    const response = await axios({
-      url,
-      method: 'GET',
-      responseType: 'stream',
-      headers: {
-        'User-Agent': 'Mozilla/5.0'
-      },
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-      timeout: 0
+    fs.mkdirSync(tempDir, {
+        recursive: true
     });
 
-    await pipeline(
-      response.data,
-      fs.createWriteStream(rawVideoPath)
+    const id = randomUUID();
+
+    const rawPath = path.join(
+        tempDir,
+        `raw_${id}.bin`
     );
 
-    console.log('Video downloaded successfully.');
-
-    // ==========================================
-    // 2. CHECK VIDEO AND AUDIO CODECS
-    // ==========================================
-
-    updateStatus('Checking video and audio codecs...', 25);
-
-    console.log('[2/5] Checking media information...');
-
-    const info = getVideoInfo(rawVideoPath);
-
-    const videoStream = info.streams.find(
-      stream => stream.codec_type === 'video'
+    const outPath = path.join(
+        tempDir,
+        `out_${id}.mp4`
     );
 
-    const audioStream = info.streams.find(
-      stream => stream.codec_type === 'audio'
+    const thumbPath = path.join(
+        tempDir,
+        `thumb_${id}.jpg`
     );
 
-    if (!videoStream) {
-      throw new Error('No video stream found.');
-    }
+    let sub1Vtt = null;
+    let sub2Vtt = null;
 
-    const videoCodec = videoStream.codec_name;
+    let permanentId = null;
+    let telegramFileId = null;
 
-    const audioCodec = audioStream
-      ? audioStream.codec_name
-      : 'none';
+    let completed = false;
 
-    const audioProfile = audioStream
-      ? audioStream.profile
-      : null;
+    try {
 
-    const formatName = info.format.format_name || '';
+        console.log(`\n[Job Started] ${title}`);
 
-    const duration = parseFloat(info.format.duration) || 0;
+        // ========================================
+        // 1. DOWNLOAD
+        // ========================================
 
-    const isMp4 = formatName.split(',').includes('mp4');
-
-    const isH264 = videoCodec === 'h264';
-
-    const isAacLc =
-      audioCodec === 'aac' &&
-      audioProfile === 'LC';
-
-    const hasAudio = Boolean(audioStream);
-
-    console.log('--------------------------------');
-    console.log(`Video Codec: ${videoCodec}`);
-    console.log(`Audio Codec: ${audioCodec}`);
-    console.log(`Audio Profile: ${audioProfile || 'N/A'}`);
-    console.log(`Container: ${formatName}`);
-    console.log(`Duration: ${duration}`);
-    console.log('--------------------------------');
-
-    // ==========================================
-    // 3. SELECT PROCESSING METHOD
-    // ==========================================
-
-    let processingMode;
-
-    let ffmpegArgs = [];
-
-    if (isH264 && isMp4 && isAacLc) {
-
-      // ----------------------------------------
-      // CASE 1: H264 MP4 + AAC-LC
-      // ----------------------------------------
-
-      processingMode = 'ORIGINAL_COPY';
-
-      console.log(
-        '[3/5] H264 MP4 + AAC-LC detected.'
-      );
-
-      console.log(
-        'Original file will be uploaded without changes.'
-      );
-
-      updateStatus('Compatible MP4 detected. Copying original...', 40);
-
-      fs.copyFileSync(
-        rawVideoPath,
-        outputVideoPath
-      );
-
-      updateStatus('Original file ready...', 80);
-
-    } else if (isH264 && isMp4) {
-
-      // ----------------------------------------
-      // CASE 2: H264 MP4 + INCOMPATIBLE AUDIO
-      // ----------------------------------------
-
-      processingMode = 'AUDIO_ONLY';
-
-      console.log(
-        '[3/5] H264 MP4 detected. Converting audio only.'
-      );
-
-      updateStatus('Converting audio to AAC...', 40);
-
-      ffmpegArgs = [
-        '-y',
-
-        '-i', rawVideoPath,
-
-        '-map', '0:v:0',
-        '-map', '0:a:0?',
-
-        // Keep original video quality
-        '-c:v', 'copy',
-
-        // Convert audio to AAC
-        '-c:a', 'aac',
-        '-b:a', '160k',
-        '-ac', '2',
-
-        // MP4 optimization
-        '-movflags', '+faststart',
-
-        '-progress', 'pipe:1',
-
-        outputVideoPath
-      ];
-
-      await runFFmpeg(
-        ffmpegArgs,
-        duration,
-        updateStatus
-      );
-
-    } else {
-
-      // ----------------------------------------
-      // CASE 3: ALL OTHER VIDEO FORMATS
-      // ----------------------------------------
-
-      processingMode = 'FULL_CONVERSION';
-
-      console.log(
-        `[3/5] Converting ${videoCodec} to H264 + AAC.`
-      );
-
-      console.log('CRF: 23');
-
-      updateStatus('Converting to H264 MP4 (CRF 23)...', 40);
-
-      ffmpegArgs = [
-        '-y',
-
-        '-i', rawVideoPath,
-
-        '-map', '0:v:0',
-        '-map', '0:a:0?',
-
-        // H264 video
-        '-c:v', 'libx264',
-
-        '-preset', 'ultrafast',
-
-        '-crf', '23',
-
-        '-threads', '1',
-
-        // AAC audio
-        '-c:a', 'aac',
-
-        '-b:a', '160k',
-
-        '-ac', '2',
-
-        // MP4 optimization
-        '-movflags', '+faststart',
-
-        '-progress', 'pipe:1',
-
-        outputVideoPath
-      ];
-
-      await runFFmpeg(
-        ffmpegArgs,
-        duration,
-        updateStatus
-      );
-    }
-
-    console.log(`Processing Mode: ${processingMode}`);
-
-    // ==========================================
-    // 4. VERIFY OUTPUT FILE
-    // ==========================================
-
-    if (!fs.existsSync(outputVideoPath)) {
-      throw new Error('Output video was not created.');
-    }
-
-    const fileSize = fs.statSync(outputVideoPath).size;
-
-    if (fileSize === 0) {
-      throw new Error('Output video is empty.');
-    }
-
-    const fileSizeGB = fileSize / (1024 ** 3);
-
-    console.log(
-      `Final Video Size: ${(fileSize / (1024 * 1024)).toFixed(2)} MB`
-    );
-
-    // ==========================================
-    // 5. UPLOAD TO CLOUDFLARE R2
-    // ==========================================
-
-    updateStatus('Uploading to R2...', 80);
-
-    console.log('[4/5] Uploading to Cloudflare R2...');
-
-    permanentId = uuidv4();
-
-    const r2Key = `videos/${permanentId}.mp4`;
-
-    // Convert subtitles
-
-    subtitle1Vtt = convertSrtToVtt(subtitle1);
-
-    subtitle2Vtt = convertSrtToVtt(subtitle2);
-
-    // Upload video
-
-    await s3Client.send(
-      new PutObjectCommand({
-
-        Bucket: process.env.R2_BUCKET_NAME,
-
-        Key: r2Key,
-
-        Body: fs.createReadStream(outputVideoPath),
-
-        ContentType: 'video/mp4'
-
-      })
-    );
-
-    console.log('R2 Video Upload Complete.');
-
-    // ==========================================
-    // UPLOAD SINHALA SUBTITLE
-    // ==========================================
-
-    if (subtitle1Vtt && fs.existsSync(subtitle1Vtt)) {
-
-      await s3Client.send(
-        new PutObjectCommand({
-
-          Bucket: process.env.R2_BUCKET_NAME,
-
-          Key: `subtitles/${permanentId}_sin.vtt`,
-
-          Body: fs.createReadStream(subtitle1Vtt),
-
-          ContentType: 'text/vtt'
-
-        })
-      );
-
-      console.log('Sinhala Subtitle Uploaded.');
-
-    }
-
-    // ==========================================
-    // UPLOAD ENGLISH SUBTITLE
-    // ==========================================
-
-    if (subtitle2Vtt && fs.existsSync(subtitle2Vtt)) {
-
-      await s3Client.send(
-        new PutObjectCommand({
-
-          Bucket: process.env.R2_BUCKET_NAME,
-
-          Key: `subtitles/${permanentId}_eng.vtt`,
-
-          Body: fs.createReadStream(subtitle2Vtt),
-
-          ContentType: 'text/vtt'
-
-        })
-      );
-
-      console.log('English Subtitle Uploaded.');
-
-    }
-
-    // ==========================================
-    // 6. TELEGRAM UPLOAD
-    // ==========================================
-
-    if (fileSizeGB < 1.95) {
-
-      updateStatus('Uploading to Telegram...', 90);
-
-      console.log('[5/5] Uploading to Telegram...');
-
-      // Generate thumbnail
-
-      try {
-
-        execFileSync('ffmpeg', [
-          '-y',
-          '-ss', '00:00:05',
-          '-i', outputVideoPath,
-          '-vframes', '1',
-          '-vf', 'scale=320:-2',
-          '-q:v', '5',
-          thumbPath
-        ]);
-
-      } catch (e) {
-
-        console.log('Thumbnail generation failed.');
-
-      }
-
-      const form = new FormData();
-
-      form.append(
-        'chat_id',
-        process.env.TG_CHAT_ID
-      );
-
-      form.append(
-        'video',
-        fs.createReadStream(outputVideoPath)
-      );
-
-      form.append(
-        'caption',
-        `🎬 ${title}\nID: ${permanentId}`
-      );
-
-      form.append(
-        'supports_streaming',
-        'true'
-      );
-
-      if (fs.existsSync(thumbPath)) {
-
-        form.append(
-          'thumbnail',
-          fs.createReadStream(thumbPath)
+        updateStatus(
+            'Downloading video',
+            0,
+            {
+                detail: 'Connecting to source…',
+                speed: null
+            }
         );
 
-      }
+        const response = await axios({
 
-      if (duration > 0) {
+            url,
 
-        form.append(
-          'duration',
-          Math.round(duration).toString()
-        );
+            method: 'GET',
 
-      }
+            responseType: 'stream',
 
-      try {
+            headers: {
+                'User-Agent': 'Mozilla/5.0'
+            },
 
-        const tgRes = await axios.post(
-          `http://localhost:8081/bot${process.env.TG_BOT_TOKEN}/sendVideo`,
-          form,
-          {
-            headers: form.getHeaders(),
+            maxContentLength: Infinity,
+
             maxBodyLength: Infinity,
-            maxContentLength: Infinity
-          }
+
+            timeout: 0,
+
+            validateStatus: status =>
+                status >= 200 && status < 300
+
+        });
+
+        const total =
+            Number(response.headers['content-length']) ||
+            null;
+
+        let lastAt = Date.now();
+        let lastBytes = 0;
+
+        const meter = makeProgressTransform(
+            total,
+
+            (loaded, expected) => {
+
+                const now = Date.now();
+
+                let speed = null;
+
+                if (now - lastAt >= 1000) {
+
+                    speed =
+                        (loaded - lastBytes) /
+                        ((now - lastAt) / 1000);
+
+                    lastAt = now;
+                    lastBytes = loaded;
+
+                }
+
+                updateStatus(
+                    'Downloading video',
+
+                    expected
+                        ? 25 * loaded / expected
+                        : null,
+
+                    {
+                        loadedBytes: loaded,
+                        totalBytes: expected,
+                        speed
+                    }
+                );
+
+            }
         );
 
-        telegramFileId = tgRes.data.result.video.file_id;
+        await pipeline(
+            response.data,
+            meter,
+            fs.createWriteStream(rawPath)
+        );
 
-        console.log('Telegram Upload Complete.');
+        updateStatus(
+            'Download complete — checking codecs',
+            26,
+            {
+                loadedBytes: fs.statSync(rawPath).size,
+                totalBytes: fs.statSync(rawPath).size,
+                speed: 0
+            }
+        );
 
-      } catch (e) {
+        // ========================================
+        // 2. CHECK VIDEO CODECS
+        // ========================================
+
+        const info = getVideoInfo(rawPath);
+
+        const video = info.streams.find(
+            s => s.codec_type === 'video'
+        );
+
+        const audio = info.streams.find(
+            s => s.codec_type === 'audio'
+        );
+
+        if (!video) {
+            throw new Error(
+                'No video stream found in downloaded file.'
+            );
+        }
+
+        const duration =
+            Number(info.format.duration) || 0;
+
+        const isMp4 =
+            (info.format.format_name || '')
+                .split(',')
+                .includes('mp4');
+
+        const isH264 =
+            video.codec_name === 'h264';
+
+        const isAacLc =
+            audio?.codec_name === 'aac' &&
+            audio?.profile === 'LC';
+
+        let mode;
+
+        // ========================================
+        // 3. CONVERSION
+        // ========================================
+
+        if (isMp4 && isH264 && isAacLc) {
+
+            mode = 'ORIGINAL_COPY';
+
+            updateStatus(
+                'Compatible H.264/AAC MP4 — keeping original quality',
+                65,
+                {
+                    detail: 'No re-encoding required'
+                }
+            );
+
+            await pipeline(
+                fs.createReadStream(rawPath),
+                fs.createWriteStream(outPath)
+            );
+
+        } else {
+
+            mode =
+                isMp4 && isH264
+                    ? 'AUDIO_ONLY'
+                    : 'FULL_CONVERSION';
+
+            const args = [
+                '-y',
+                '-i',
+                rawPath,
+                '-map',
+                '0:v:0',
+                '-map',
+                '0:a:0?'
+            ];
+
+            if (mode === 'AUDIO_ONLY') {
+
+                args.push(
+                    '-c:v',
+                    'copy'
+                );
+
+            } else {
+
+                args.push(
+                    '-c:v',
+                    'libx264',
+                    '-preset',
+                    'ultrafast',
+                    '-crf',
+                    '23',
+                    '-threads',
+                    '1'
+                );
+
+            }
+
+            args.push(
+                '-c:a',
+                'aac',
+                '-b:a',
+                '160k',
+                '-ac',
+                '2',
+                '-movflags',
+                '+faststart',
+                '-progress',
+                'pipe:1',
+                '-nostats',
+                outPath
+            );
+
+            await runFFmpeg(
+                args,
+                duration,
+                updateStatus,
+
+                mode === 'AUDIO_ONLY'
+                    ? 'Converting audio to AAC'
+                    : 'Converting video to H.264 MP4'
+            );
+
+        }
+
+        if (
+            !fs.existsSync(outPath) ||
+            fs.statSync(outPath).size === 0
+        ) {
+            throw new Error(
+                'Output MP4 was not created or is empty.'
+            );
+        }
+
+        const fileSize = fs.statSync(outPath).size;
 
         console.log(
-          'Telegram Upload Failed: ' +
-          (e.response?.data?.description || e.message)
+            `Processing mode: ${mode}; output ${(fileSize / 1048576).toFixed(2)} MB`
         );
 
-      }
+        permanentId = randomUUID();
 
-    } else {
+        const r2Key = `videos/${permanentId}.mp4`;
 
-      console.log(
-        'Telegram upload skipped: File exceeds size limit.'
-      );
+        // ========================================
+        // 4. SUBTITLE CONVERSION
+        // ========================================
 
-    }
+        sub1Vtt = convertSrtToVtt(subtitle1);
 
-    // ==========================================
-    // 7. DATABASE SYNC
-    // ==========================================
+        sub2Vtt = convertSrtToVtt(subtitle2);
 
-    updateStatus('Syncing Database...', 95);
+        // ========================================
+        // 5. R2 VIDEO UPLOAD
+        // ========================================
 
-    await axios.post(
+        updateStatus(
+            'Uploading video to Cloudflare R2',
+            66,
+            {
+                detail: 'Preparing upload'
+            }
+        );
 
-      `${process.env.CF_API_URL || 'https://tipiz.moviezonee.workers.dev'}/api/vps/sync`,
+        await uploadR2(
+            outPath,
+            r2Key,
+            'video/mp4',
 
-      {
-        uuid: permanentId,
+            (loaded, totalBytes, speed) => {
 
-        title: title,
+                updateStatus(
+                    'Uploading video to Cloudflare R2',
 
-        r2_key: r2Key,
+                    totalBytes
+                        ? 66 + 17 * loaded / totalBytes
+                        : null,
 
-        telegram_file_id: telegramFileId,
+                    {
+                        loadedBytes: loaded,
+                        totalBytes,
+                        speed
+                    }
+                );
 
-        source_type: 'r2'
-      },
+            }
+        );
 
-      {
-        headers: {
-          'Authorization': `Bearer ${process.env.CF_VPS_API_KEY}`
+        updateStatus(
+            'R2 video upload complete',
+            84
+        );
+
+        // ========================================
+        // 6. SUBTITLE UPLOAD
+        // ========================================
+
+        const subtitleTasks = [
+
+            {
+                file: sub1Vtt,
+                key: `subtitles/${permanentId}_sin.vtt`,
+                label: 'Sinhala subtitle'
+            },
+
+            {
+                file: sub2Vtt,
+                key: `subtitles/${permanentId}_eng.vtt`,
+                label: 'English subtitle'
+            }
+
+        ].filter(item =>
+            item.file && fs.existsSync(item.file)
+        );
+
+        for (
+            let i = 0;
+            i < subtitleTasks.length;
+            i++
+        ) {
+
+            const task = subtitleTasks[i];
+
+            updateStatus(
+                `Uploading ${task.label}`,
+                84 + (
+                    i / Math.max(1, subtitleTasks.length)
+                ) * 4
+            );
+
+            await uploadR2(
+                task.file,
+                task.key,
+                'text/vtt',
+
+                (loaded, totalBytes, speed) => {
+
+                    const base =
+                        84 + (
+                            i / Math.max(1, subtitleTasks.length)
+                        ) * 4;
+
+                    updateStatus(
+                        `Uploading ${task.label}`,
+
+                        totalBytes
+                            ? base + (
+                                4 * (loaded / totalBytes) /
+                                Math.max(1, subtitleTasks.length)
+                            )
+                            : null,
+
+                        {
+                            loadedBytes: loaded,
+                            totalBytes,
+                            speed
+                        }
+                    );
+
+                }
+            );
+
         }
-      }
 
-    );
+        // ========================================
+        // 7. TELEGRAM UPLOAD
+        // ========================================
 
-    console.log('Database Sync Complete.');
+        if (
+            fileSize < 1.95 * 1024 ** 3 &&
+            process.env.TG_BOT_TOKEN &&
+            process.env.TG_CHAT_ID
+        ) {
 
-    // ==========================================
-    // 8. COMPLETED
-    // ==========================================
+            updateStatus(
+                'Preparing Telegram upload',
+                89
+            );
 
-    updateStatus('Completed!', 100);
+            try {
 
-    console.log(`[Job Completed] ${title}`);
+                try {
 
-  } catch (err) {
+                    execFileSync(
+                        'ffmpeg',
 
-    // ==========================================
-    // ERROR HANDLING
-    // ==========================================
+                        [
+                            '-y',
+                            '-ss',
+                            '00:00:05',
+                            '-i',
+                            outPath,
+                            '-vframes',
+                            '1',
+                            '-vf',
+                            'scale=320:-2',
+                            '-q:v',
+                            '5',
+                            thumbPath
+                        ],
 
-    console.error(`[Job Failed] ${err.message}`);
+                        {
+                            stdio: 'ignore'
+                        }
+                    );
 
-    updateStatus(
-      'Failed: ' + err.message,
-      100
-    );
+                } catch (_) {
+                    // Thumbnail is optional.
+                }
 
-  } finally {
+                const form = new FormData();
 
-    // ==========================================
-    // 9. CLEANUP TEMPORARY FILES
-    // ==========================================
+                form.append(
+                    'chat_id',
+                    process.env.TG_CHAT_ID
+                );
 
-    console.log('Cleaning temporary files...');
+                form.append(
+                    'video',
+                    fs.createReadStream(outPath),
+                    {
+                        filename: `${permanentId}.mp4`,
+                        contentType: 'video/mp4'
+                    }
+                );
 
-    const cleanupFiles = [
-      rawVideoPath,
-      outputVideoPath,
-      thumbPath,
-      subtitle1,
-      subtitle2
-    ];
+                form.append(
+                    'caption',
+                    `🎬 ${title}\nID: ${permanentId}`
+                );
 
-    if (
-      subtitle1 &&
-      subtitle1Vtt &&
-      subtitle1 !== subtitle1Vtt
-    ) {
-      cleanupFiles.push(subtitle1Vtt);
-    }
+                form.append(
+                    'supports_streaming',
+                    'true'
+                );
 
-    if (
-      subtitle2 &&
-      subtitle2Vtt &&
-      subtitle2 !== subtitle2Vtt
-    ) {
-      cleanupFiles.push(subtitle2Vtt);
-    }
+                if (fs.existsSync(thumbPath)) {
 
-    for (const file of cleanupFiles) {
+                    form.append(
+                        'thumbnail',
+                        fs.createReadStream(thumbPath)
+                    );
 
-      if (file && fs.existsSync(file)) {
+                }
 
-        try {
+                if (duration > 0) {
 
-          fs.unlinkSync(file);
+                    form.append(
+                        'duration',
+                        String(Math.round(duration))
+                    );
 
-        } catch (e) {
+                }
 
-          console.error(
-            `Cleanup failed: ${file}`,
-            e.message
-          );
+                const tgUrl =
+                    process.env.TG_API_BASE_URL ||
+                    'http://localhost:8081';
+
+                const tgRes = await axios.post(
+
+                    `${tgUrl}/bot${process.env.TG_BOT_TOKEN}/sendVideo`,
+
+                    form,
+
+                    {
+                        headers: form.getHeaders(),
+
+                        maxBodyLength: Infinity,
+
+                        maxContentLength: Infinity,
+
+                        timeout: 0,
+
+                        onUploadProgress: event => {
+
+                            updateStatus(
+                                'Uploading to Telegram',
+
+                                event.total
+                                    ? 89 + 8 * event.loaded / event.total
+                                    : null,
+
+                                {
+                                    loadedBytes: event.loaded,
+                                    totalBytes: event.total || null
+                                }
+                            );
+
+                        }
+
+                    }
+
+                );
+
+                telegramFileId =
+                    tgRes.data?.result?.video?.file_id ||
+                    null;
+
+                updateStatus(
+                    'Telegram upload complete',
+                    97
+                );
+
+            } catch (e) {
+
+                console.error(
+                    'Telegram upload failed:',
+                    e.response?.data?.description || e.message
+                );
+
+                updateStatus(
+                    'Telegram upload failed — continuing with database sync',
+                    97,
+                    {
+                        detail:
+                            e.response?.data?.description ||
+                            e.message
+                    }
+                );
+
+            }
+
+        } else {
+
+            updateStatus(
+
+                fileSize >= 1.95 * 1024 ** 3
+                    ? 'Telegram skipped (file exceeds configured size limit)'
+                    : 'Telegram not configured — skipped',
+
+                97
+
+            );
 
         }
 
-      }
+        // ========================================
+        // 8. DATABASE SYNC
+        // ========================================
+
+        updateStatus(
+            'Syncing video record to database',
+            98
+        );
+
+        const syncUrl =
+            `${process.env.CF_API_URL || 'https://tipiz.moviezonee.workers.dev'}/api/vps/sync`;
+
+        const syncRes = await axios.post(
+
+            syncUrl,
+
+            {
+                uuid: permanentId,
+                title,
+                r2_key: r2Key,
+                telegram_file_id: telegramFileId,
+                source_type: 'r2'
+            },
+
+            {
+                headers: {
+                    Authorization:
+                        `Bearer ${process.env.CF_VPS_API_KEY}`
+                },
+
+                timeout: 60000
+            }
+
+        );
+
+        if (
+            syncRes.status < 200 ||
+            syncRes.status >= 300
+        ) {
+            throw new Error(
+                `Database sync failed with HTTP ${syncRes.status}`
+            );
+        }
+
+        console.log(
+            `[Job Completed] ${title} (${permanentId})`
+        );
+
+        completed = true;
+
+        return {
+            permanentId,
+            r2Key,
+            telegramFileId
+        };
+
+    } catch (err) {
+
+        console.error(
+            `[Job Failed] ${title}:`,
+            err.message
+        );
+
+        throw err;
+
+    } finally {
+
+        // ========================================
+        // 9. CLEANUP
+        // ========================================
+
+        const cleanup = [
+            rawPath,
+            outPath,
+            thumbPath
+        ];
+
+        // Failed job retry එකට subtitles තබාගන්නවා.
+        if (completed) {
+
+            cleanup.push(
+                subtitle1,
+                subtitle2
+            );
+
+            if (
+                subtitle1 &&
+                sub1Vtt &&
+                subtitle1 !== sub1Vtt
+            ) {
+                cleanup.push(sub1Vtt);
+            }
+
+            if (
+                subtitle2 &&
+                sub2Vtt &&
+                subtitle2 !== sub2Vtt
+            ) {
+                cleanup.push(sub2Vtt);
+            }
+
+        }
+
+        for (const file of cleanup) {
+
+            if (file && fs.existsSync(file)) {
+
+                try {
+
+                    fs.unlinkSync(file);
+
+                } catch (e) {
+
+                    console.error(
+                        `Cleanup failed for ${file}:`,
+                        e.message
+                    );
+
+                }
+
+            }
+
+        }
 
     }
-
-    console.log('Temporary file cleanup completed.');
-
-  }
 
 }
 
-// ==========================================
+// ========================================
 // EXPORT
-// ==========================================
+// ========================================
 
 module.exports = {
-  processVideo,
-  convertSrtToVtt
+    processVideo,
+    convertSrtToVtt
 };

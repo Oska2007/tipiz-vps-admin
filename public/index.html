@@ -2,356 +2,965 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
     <title>TIPIZ VPS Admin</title>
+
     <style>
+      :root {
+        color-scheme: dark;
+
+        --bg: #080d18;
+        --card: #101a2b;
+        --line: #23334e;
+        --muted: #91a0ba;
+        --blue: #5794ff;
+        --green: #28c78a;
+        --red: #ff647c;
+        --amber: #ffc15a;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
       body {
-        background: #080b14;
-        color: #e8ecf5;
-        font-family: system-ui, sans-serif;
-        padding: 20px;
+        margin: 0;
+
+        background: radial-gradient(ellipse at top, #14223b 0, #080d18 55%);
+
+        color: #edf3ff;
+
+        font:
+          14px/1.5 system-ui,
+          sans-serif;
+
+        padding: 22px;
       }
+
       .container {
-        max-width: 1100px;
-        margin: 0 auto;
+        max-width: 1120px;
+        margin: auto;
       }
-      .card {
-        background: #0f1424;
-        padding: 25px;
-        border-radius: 16px;
-        border: 1px solid #1e2a4a;
-        margin-bottom: 20px;
-      }
-      h2 {
-        color: #4f8cff;
-        margin-bottom: 20px;
-        text-align: center;
-      }
-      .nav {
-        text-align: center;
-        margin-bottom: 20px;
+
+      .top {
         display: flex;
-        gap: 10px;
-        justify-content: center;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 22px;
       }
+
+      .brand {
+        font-size: 21px;
+        font-weight: 800;
+      }
+
+      .brand span {
+        color: var(--blue);
+      }
+
+      .nav {
+        display: flex;
+        gap: 9px;
+      }
+
       .nav a {
         color: white;
         text-decoration: none;
-        padding: 10px 20px;
-        background: #1e2a4a;
-        border-radius: 8px;
-      }
-      .nav a.active {
-        background: #4f8cff;
+        padding: 9px 14px;
+        border-radius: 9px;
+        background: #1a2a44;
       }
 
-      /* Dynamic Row Styles */
+      .nav a.logout {
+        background: #572638;
+      }
+
+      .card {
+        background: rgba(16, 26, 43, 0.94);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 22px;
+        margin-bottom: 18px;
+        box-shadow: 0 12px 35px #0002;
+      }
+
+      .card h2 {
+        margin: 0 0 18px;
+        font-size: 18px;
+      }
+
+      .sub {
+        color: var(--muted);
+        margin: -10px 0 18px;
+        font-size: 13px;
+      }
+
       .job-row {
         display: grid;
-        grid-template-columns: 1fr 1fr 1fr 1fr auto;
+
+        grid-template-columns: 1.1fr 1.5fr 1fr 1fr auto;
+
         gap: 10px;
-        align-items: start;
-        background: #0a0f1c;
-        padding: 15px;
-        border-radius: 8px;
+
+        align-items: end;
+
+        padding: 13px;
+
+        background: #0b1423;
+
+        border: 1px solid var(--line);
+
+        border-radius: 12px;
+
         margin-bottom: 10px;
-        border: 1px solid #1e2a4a;
-      }
-      .job-row input[type="text"],
-      .job-row input[type="url"],
-      .job-row input[type="file"] {
-        width: 100%;
-        padding: 10px;
-        background: #0f1424;
-        border: 1px solid #1e2a4a;
-        color: white;
-        border-radius: 6px;
-        font-size: 13px;
-        box-sizing: border-box;
-      }
-      .job-row label {
-        font-size: 11px;
-        color: #8b96b5;
-        display: block;
-        margin-bottom: 4px;
-      }
-      .btn-remove {
-        background: #ef4444;
-        color: white;
-        border: none;
-        padding: 10px;
-        border-radius: 6px;
-        cursor: pointer;
-        font-weight: bold;
-        height: 100%;
-      }
-      .btn-add {
-        background: #22c55e;
-        color: white;
-        border: none;
-        padding: 12px;
-        border-radius: 8px;
-        cursor: pointer;
-        font-weight: bold;
-        margin-bottom: 20px;
-        width: 100%;
-        font-size: 15px;
-      }
-      .btn-submit {
-        background: linear-gradient(90deg, #4f8cff, #7c3aed);
-        color: white;
-        border: none;
-        padding: 15px;
-        border-radius: 8px;
-        cursor: pointer;
-        font-weight: bold;
-        width: 100%;
-        font-size: 16px;
       }
 
-      /* Progress UI */
-      .job-item {
-        background: #0a0f1c;
-        padding: 15px;
+      .field label {
+        display: block;
+
+        color: var(--muted);
+
+        font-size: 11px;
+
+        margin-bottom: 6px;
+      }
+
+      .field input {
+        width: 100%;
+
+        min-width: 0;
+
+        padding: 10px;
+
         border-radius: 8px;
-        margin-bottom: 10px;
-        border-left: 4px solid #4f8cff;
+
+        border: 1px solid #2b3d5b;
+
+        background: #101d30;
+
+        color: white;
       }
-      .job-title {
-        font-weight: bold;
-        font-size: 14px;
-        margin-bottom: 5px;
+
+      .field input[type="file"] {
+        font-size: 11px;
+        padding: 7px;
       }
-      .job-status {
-        font-size: 13px;
-        color: #8b96b5;
-        margin-bottom: 10px;
+
+      .btn {
+        border: 0;
+
+        border-radius: 9px;
+
+        padding: 11px 14px;
+
+        color: white;
+
+        font-weight: 700;
+
+        cursor: pointer;
       }
-      .progress-bar {
-        height: 6px;
-        background: #1e2a4a;
-        border-radius: 3px;
+
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: wait;
+      }
+
+      .add {
+        background: #176c50;
+
+        width: 100%;
+
+        margin: 5px 0 12px;
+      }
+
+      .submit {
+        background: linear-gradient(100deg, #367df0, #7854e8);
+
+        width: 100%;
+
+        padding: 14px;
+
+        font-size: 15px;
+      }
+
+      .remove {
+        background: #702b3b;
+        padding: 10px;
+      }
+
+      .summary {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 9px;
+        margin-bottom: 16px;
+      }
+
+      .pill {
+        background: #0b1423;
+
+        border: 1px solid var(--line);
+
+        border-radius: 999px;
+
+        padding: 6px 11px;
+
+        color: var(--muted);
+
+        font-size: 12px;
+      }
+
+      .pill b {
+        color: white;
+      }
+
+      .job {
+        background: #0b1423;
+
+        border: 1px solid var(--line);
+
+        border-radius: 13px;
+
+        padding: 15px;
+
+        margin: 10px 0;
+      }
+
+      .jobhead {
+        display: flex;
+
+        justify-content: space-between;
+
+        gap: 10px;
+
+        align-items: flex-start;
+      }
+
+      .title {
+        font-weight: 750;
+        overflow-wrap: anywhere;
+      }
+
+      .badge {
+        white-space: nowrap;
+
+        border-radius: 99px;
+
+        padding: 4px 9px;
+
+        font-size: 11px;
+
+        font-weight: 800;
+
+        background: #26364f;
+
+        color: #c9d8f0;
+      }
+
+      .badge.processing {
+        background: #173c73;
+        color: #9fc5ff;
+      }
+
+      .badge.completed {
+        background: #124b3b;
+        color: #85f0c3;
+      }
+
+      .badge.failed {
+        background: #552638;
+        color: #ffabb9;
+      }
+
+      .badge.queued {
+        background: #55411d;
+        color: #ffdb91;
+      }
+
+      .stage {
+        color: var(--muted);
+        font-size: 12px;
+        margin: 8px 0;
+      }
+
+      .bar {
+        height: 9px;
+
+        border-radius: 20px;
+
+        background: #1d2a40;
+
         overflow: hidden;
       }
-      .progress-fill {
+
+      .fill {
         height: 100%;
-        background: #22c55e;
-        width: 0%;
-        transition: width 0.3s;
+
+        width: 0;
+
+        background: linear-gradient(90deg, #438bff, #35d4a0);
+
+        transition: width 0.35s;
+      }
+
+      .meta {
+        display: flex;
+
+        justify-content: space-between;
+
+        gap: 10px;
+
+        color: var(--muted);
+
+        font-size: 11px;
+
+        margin-top: 7px;
+
+        flex-wrap: wrap;
+      }
+
+      .error {
+        color: #ff9eae;
+
+        font-size: 12px;
+
+        margin-top: 8px;
+
+        overflow-wrap: anywhere;
+      }
+
+      .actions {
+        display: flex;
+        gap: 7px;
+        margin-top: 10px;
+      }
+
+      .smallbtn {
+        background: #263b5d;
+        padding: 6px 10px;
+        font-size: 11px;
+      }
+
+      .smallbtn.danger {
+        background: #572638;
+      }
+
+      .empty {
+        text-align: center;
+        color: var(--muted);
+        padding: 22px;
+      }
+
+      .hint {
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 12px;
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 0.35;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
+
+      @media (max-width: 800px) {
+        body {
+          padding: 12px;
+        }
+
+        .job-row {
+          grid-template-columns: 1fr 1fr;
+        }
+
+        .job-row .field:nth-child(2) {
+          grid-column: 1/-1;
+        }
+
+        .top {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        .card {
+          padding: 15px;
+        }
+      }
+
+      @media (max-width: 480px) {
+        .job-row {
+          grid-template-columns: 1fr;
+        }
+
+        .job-row .field:nth-child(2) {
+          grid-column: auto;
+        }
+
+        .jobhead {
+          flex-direction: column;
+        }
+
+        .meta {
+          display: block;
+        }
+
+        .meta span {
+          display: block;
+          margin-top: 3px;
+        }
       }
     </style>
   </head>
+
   <body>
-    <div class="container">
-      <div class="nav">
-        <!-- අමතර බටන්ස් අයින් කරලා තියෙන්නේ මෙතන -->
-        <a href="/" class="active">Process Videos</a>
-        <a href="/logout" style="background: #ef4444">Logout</a>
-      </div>
+    <main class="container">
+      <header class="top">
+        <div class="brand">TIPIZ <span>VPS ADMIN</span></div>
 
-      <div class="card">
+        <nav class="nav">
+          <a href="/"> Process Videos </a>
+
+          <a class="logout" href="/logout"> Logout </a>
+        </nav>
+      </header>
+
+      <section class="card">
         <h2>Batch Video Processing</h2>
-        <div id="rows-container">
-          <!-- Rows will be added here by JS -->
-        </div>
 
-        <button type="button" class="btn-add" onclick="addRow()">
-          + Add Another Video (Max 10)
+        <p class="sub">
+          Add up to 10 video links per batch. Jobs are processed one at a time.
+          Queue survives server restarts.
+        </p>
+
+        <div id="rows-container"></div>
+
+        <button class="btn add" type="button" onclick="addRow()">
+          ＋ Add Another Video (Max 10)
         </button>
 
         <button
-          type="button"
-          class="btn-submit"
-          onclick="submitBatch()"
+          class="btn submit"
           id="btnSubmit"
+          type="button"
+          onclick="submitBatch()"
         >
-          Start Processing Queue
+          Add to Processing Queue
         </button>
-      </div>
 
-      <div class="card">
+        <p class="hint">
+          Download, FFmpeg, R2 and Telegram progress are displayed here. If the
+          source does not provide its file size, download progress is shown as
+          indeterminate.
+        </p>
+      </section>
+
+      <section class="card">
         <h2>Live Processing Queue</h2>
+
+        <div class="summary" id="summary"></div>
+
         <div id="jobsList">
-          <p style="color: #8b96b5; text-align: center">No active jobs.</p>
+          <div class="empty">Loading queue…</div>
         </div>
-      </div>
-    </div>
+      </section>
+    </main>
 
     <script>
       let rowCount = 0;
       let nextRowId = 1;
 
+      // ========================================
+      // ADD ROW
+      // ========================================
+
       function addRow() {
-        if (rowCount >= 10)
+        if (rowCount >= 10) {
           return alert("Maximum 10 videos allowed per batch.");
+        }
 
         const id = nextRowId++;
+
         rowCount++;
-        const container = document.getElementById("rows-container");
+
         const div = document.createElement("div");
+
         div.className = "job-row";
+
         div.id = `row-${id}`;
+
         div.innerHTML = `
-        <div>
-          <label>Video Title</label>
-          <input type="text" id="title-${id}" placeholder="e.g. The Dog Stars" required>
+
+        <div class="field">
+
+            <label>Video title</label>
+
+            <input
+                type="text"
+                id="title-${id}"
+                maxlength="300"
+                placeholder="Movie / episode title"
+            >
+
         </div>
-        <div>
-          <label>Direct Link (MP4/MKV)</label>
-          <input type="url" id="url-${id}" placeholder="https://..." required>
+
+        <div class="field">
+
+            <label>Direct video link (MP4 / MKV)</label>
+
+            <input
+                type="url"
+                id="url-${id}"
+                placeholder="https://..."
+            >
+
         </div>
-        <div>
-          <label>Subtitle 1 (Sinhala - Default)</label>
-          <input type="file" id="sub1-${id}" accept=".srt,.vtt">
+
+        <div class="field">
+
+            <label>Sinhala subtitle</label>
+
+            <input
+                type="file"
+                id="sub1-${id}"
+                accept=".srt,.vtt"
+            >
+
         </div>
-        <div>
-          <label>Subtitle 2 (English - Optional)</label>
-          <input type="file" id="sub2-${id}" accept=".srt,.vtt">
+
+        <div class="field">
+
+            <label>English subtitle</label>
+
+            <input
+                type="file"
+                id="sub2-${id}"
+                accept=".srt,.vtt"
+            >
+
         </div>
-        <div style="display:flex; align-items:center; height:100%;">
-          <button type="button" class="btn-remove" onclick="removeRow(${id})">X</button>
-        </div>
-      `;
-        container.appendChild(div);
+
+        <button
+            class="btn remove"
+            type="button"
+            onclick="removeRow(${id})"
+        >
+            Remove
+        </button>
+
+    `;
+
+        document.getElementById("rows-container").appendChild(div);
       }
 
+      // ========================================
+      // REMOVE ROW
+      // ========================================
+
       function removeRow(id) {
-        const row = document.getElementById(`row-${id}`);
-        if (row) {
-          row.remove();
+        const el = document.getElementById(`row-${id}`);
+
+        if (el) {
+          el.remove();
+
           rowCount--;
         }
       }
 
+      // ========================================
+      // SUBMIT BATCH
+      // ========================================
+
       async function submitBatch() {
         const btn = document.getElementById("btnSubmit");
-        btn.disabled = true;
-        btn.textContent = "Starting...";
 
-        const formData = new FormData();
-        let titles = [];
-        let urls = [];
-        let hasData = false;
+        const rows = [...document.querySelectorAll(".job-row")];
 
-        const rows = document.querySelectorAll(".job-row");
+        const titles = [];
+        const urls = [];
+
+        const fd = new FormData();
+
         for (const row of rows) {
-          const id = row.id.replace("row-", "");
-          const title = document.getElementById(`title-${id}`).value.trim();
-          const url = document.getElementById(`url-${id}`).value.trim();
-          const sub1 = document.getElementById(`sub1-${id}`).files[0];
-          const sub2 = document.getElementById(`sub2-${id}`).files[0];
+          const id = row.id.slice(4);
 
-          if (title && url) {
-            titles.push(title);
-            urls.push(url);
-            if (sub1) formData.append(`sub1_${titles.length - 1}`, sub1);
-            if (sub2) formData.append(`sub2_${titles.length - 1}`, sub2);
-            hasData = true;
+          const title = document.getElementById(`title-${id}`).value.trim();
+
+          const url = document.getElementById(`url-${id}`).value.trim();
+
+          const s1 = document.getElementById(`sub1-${id}`).files[0];
+
+          const s2 = document.getElementById(`sub2-${id}`).files[0];
+
+          if (!title && !url && !s1 && !s2) {
+            continue;
+          }
+
+          if (!title || !/^https?:\/\//i.test(url)) {
+            alert(
+              "Each used row needs both a title and a valid HTTP/HTTPS link.",
+            );
+
+            return;
+          }
+
+          const index = titles.length;
+
+          titles.push(title);
+          urls.push(url);
+
+          if (s1) {
+            fd.append(`sub1_${index}`, s1);
+          }
+
+          if (s2) {
+            fd.append(`sub2_${index}`, s2);
           }
         }
 
-        if (!hasData) {
-          alert("Please add at least one video.");
-          btn.disabled = false;
-          btn.textContent = "Start Processing Queue";
-          return;
+        if (!titles.length) {
+          return alert("Please add at least one video.");
         }
 
-        formData.append("titles", JSON.stringify(titles));
-        formData.append("urls", JSON.stringify(urls));
+        if (titles.length > 10) {
+          return alert("Maximum 10 videos allowed per batch.");
+        }
+
+        fd.append("titles", JSON.stringify(titles));
+
+        fd.append("urls", JSON.stringify(urls));
+
+        btn.disabled = true;
+
+        btn.textContent = "Adding jobs…";
 
         try {
-          const res = await fetch("/api/process-batch", {
+          const r = await fetch("/api/process-batch", {
             method: "POST",
-            body: formData,
-            headers: { Accept: "application/json" },
+            body: fd,
+            headers: {
+              Accept: "application/json",
+            },
           });
 
-          const contentType = res.headers.get("content-type") || "";
-          if (!res.ok) {
-            if (contentType.includes("application/json")) {
-              const data = await res.json();
-              if (res.status === 401) {
-                window.location.href = "/login.html";
-                throw new Error(data.error || "Session expired. Please log in again.");
-              }
-              throw new Error(data.error || `Request failed (${res.status})`);
-            }
-            throw new Error(
-              `Server returned an unexpected response (${res.status}).`,
-            );
+          const data = await r.json().catch(() => ({
+            error: "Unexpected server response",
+          }));
+
+          if (r.status === 401) {
+            location.href = "/login.html";
+            return;
           }
 
-          if (!contentType.includes("application/json")) {
-            throw new Error("Server returned an unexpected response. Please refresh and try again.");
+          if (!r.ok || !data.ok) {
+            throw new Error(data.error || `Request failed (${r.status})`);
           }
 
-          const data = await res.json();
-          if (data.ok) {
-            document.getElementById("rows-container").innerHTML = "";
-            rowCount = 0;
-            addRow(); // Add one empty row for next time
-            fetchStatus();
-          } else throw new Error(data.error);
-        } catch (err) {
-          alert("Error: " + err.message);
+          document.getElementById("rows-container").innerHTML = "";
+
+          rowCount = 0;
+
+          addRow();
+
+          await fetchStatus();
+        } catch (e) {
+          alert(`Error: ${e.message}`);
         } finally {
           btn.disabled = false;
-          btn.textContent = "Start Processing Queue";
+
+          btn.textContent = "Add to Processing Queue";
         }
       }
 
-      // Live Polling
-      function escapeHtml(value) {
-        return String(value)
-          .replaceAll("&", "&amp;")
-          .replaceAll("<", "&lt;")
-          .replaceAll(">", "&gt;")
-          .replaceAll('"', "&quot;")
-          .replaceAll("'", "&#039;");
+      // ========================================
+      // SAFE HTML
+      // ========================================
+
+      function esc(v) {
+        return String(v ?? "").replace(
+          /[&<>"']/g,
+
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
       }
+
+      // ========================================
+      // FORMAT BYTES
+      // ========================================
+
+      function bytes(n) {
+        if (!Number.isFinite(Number(n))) {
+          return "";
+        }
+
+        let v = Number(n);
+
+        const units = ["B", "KB", "MB", "GB"];
+
+        let i = 0;
+
+        while (v >= 1024 && i < units.length - 1) {
+          v /= 1024;
+
+          i++;
+        }
+
+        return `${v.toFixed(i ? 1 : 0)} ${units[i]}`;
+      }
+
+      // ========================================
+      // RENDER JOB
+      // ========================================
+
+      function renderJob(j) {
+        const p = Number.isFinite(j.progress)
+          ? Math.max(0, Math.min(100, j.progress))
+          : null;
+
+        const progress = p === null ? null : Math.round(p);
+
+        const transfer = j.totalBytes
+          ? `${bytes(j.loadedBytes)} / ${bytes(j.totalBytes)}`
+          : j.loadedBytes
+            ? `${bytes(j.loadedBytes)} transferred`
+            : "";
+
+        const speed = j.speed > 0 ? `${bytes(j.speed)}/s` : "";
+
+        const meta = [transfer, speed, j.detail]
+          .filter(Boolean)
+          .map(esc)
+          .join(" · ");
+
+        let buttons = "";
+
+        if (j.status === "failed") {
+          buttons = `
+
+            <div class="actions">
+
+                <button
+                    class="btn smallbtn"
+                    onclick="retryJob('${esc(j.id)}')"
+                >
+                    Retry
+                </button>
+
+                <button
+                    class="btn smallbtn danger"
+                    onclick="deleteJob('${esc(j.id)}')"
+                >
+                    Delete
+                </button>
+
+            </div>
+
+        `;
+        } else if (j.status === "completed") {
+          buttons = `
+
+            <div class="actions">
+
+                <button
+                    class="btn smallbtn danger"
+                    onclick="deleteJob('${esc(j.id)}')"
+                >
+                    Remove from history
+                </button>
+
+            </div>
+
+        `;
+        }
+
+        return `
+
+        <article class="job">
+
+            <div class="jobhead">
+
+                <div class="title">
+                    ${esc(j.title)}
+                </div>
+
+                <span class="badge ${esc(j.status)}">
+                    ${esc(j.status).toUpperCase()}
+                </span>
+
+            </div>
+
+            <div class="stage">
+
+                ${esc(j.stage || "Waiting")}
+
+                ${
+                  progress === null
+                    ? " · progress unavailable"
+                    : ` · ${progress}%`
+                }
+
+            </div>
+
+            <div class="bar">
+
+                <div
+                    class="fill"
+                    style="
+                        width:${progress === null ? "35" : progress}%;
+                        animation:${progress === null ? "pulse 1.4s ease-in-out infinite" : "none"};
+                    "
+                ></div>
+
+            </div>
+
+            <div class="meta">
+
+                <span>${meta || " "}</span>
+
+                <span>
+                    ${j.createdAt ? new Date(j.createdAt).toLocaleString() : ""}
+                </span>
+
+            </div>
+
+            ${j.error ? `<div class="error">${esc(j.error)}</div>` : ""}
+
+            ${buttons}
+
+        </article>
+
+    `;
+      }
+
+      // ========================================
+      // LIVE STATUS
+      // ========================================
 
       async function fetchStatus() {
         try {
-          const res = await fetch("/api/status", {
-            headers: { Accept: "application/json" },
+          const r = await fetch("/api/status", {
+            cache: "no-store",
           });
-          const contentType = res.headers.get("content-type") || "";
-          if (res.status === 401) {
-            window.location.href = "/login.html";
-            return;
-          }
-          if (!res.ok || !contentType.includes("application/json")) {
-            return;
-          }
-          const jobs = await res.json();
-          const list = document.getElementById("jobsList");
 
-          if (jobs.length === 0) {
-            list.innerHTML =
-              '<p style="color:#8b96b5; text-align:center;">No active jobs.</p>';
+          if (r.status === 401) {
+            location.href = "/login.html";
+
             return;
           }
 
-          list.innerHTML = jobs
+          if (!r.ok) return;
+
+          const jobs = await r.json();
+
+          const counts = {
+            queued: 0,
+            processing: 0,
+            completed: 0,
+            failed: 0,
+          };
+
+          jobs.forEach((j) => {
+            counts[j.status] = (counts[j.status] || 0) + 1;
+          });
+
+          document.getElementById("summary").innerHTML = Object.entries(counts)
             .map(
-              (job) => `
-          <div class="job-item">
-            <div class="job-title">${escapeHtml(job.title)}</div>
-            <div class="job-status">${escapeHtml(job.status)}</div>
-            <div class="progress-bar"><div class="progress-fill" style="width:${job.progress}%"></div></div>
-          </div>
-        `,
+              ([k, v]) => `
+
+                <span class="pill">
+                    ${k}: <b>${v}</b>
+                </span>
+
+            `,
             )
             .join("");
+
+          const active = jobs.filter((j) =>
+            ["processing", "queued"].includes(j.status),
+          );
+
+          const history = jobs
+            .filter((j) => ["failed", "completed"].includes(j.status))
+            .reverse();
+
+          const ordered = [...active, ...history];
+
+          document.getElementById("jobsList").innerHTML = ordered.length
+            ? ordered.map(renderJob).join("")
+            : '<div class="empty">No jobs yet. Add a video above to start.</div>';
         } catch (e) {
           console.error(e);
         }
       }
 
-      setInterval(fetchStatus, 3000);
-      addRow(); // Initial row
+      // ========================================
+      // RETRY
+      // ========================================
+
+      async function retryJob(id) {
+        try {
+          const r = await fetch(`/api/jobs/${encodeURIComponent(id)}/retry`, {
+            method: "POST",
+          });
+
+          const d = await r.json();
+
+          if (!r.ok) {
+            throw new Error(d.error);
+          }
+
+          fetchStatus();
+        } catch (e) {
+          alert(e.message);
+        }
+      }
+
+      // ========================================
+      // DELETE
+      // ========================================
+
+      async function deleteJob(id) {
+        if (!confirm("Remove this job from history?")) {
+          return;
+        }
+
+        try {
+          const r = await fetch(`/api/jobs/${encodeURIComponent(id)}`, {
+            method: "DELETE",
+          });
+
+          const d = await r.json();
+
+          if (!r.ok) {
+            throw new Error(d.error);
+          }
+
+          fetchStatus();
+        } catch (e) {
+          alert(e.message);
+        }
+      }
+
+      // ========================================
+      // START
+      // ========================================
+
+      addRow();
+
       fetchStatus();
+
+      setInterval(fetchStatus, 1500);
     </script>
   </body>
 </html>
