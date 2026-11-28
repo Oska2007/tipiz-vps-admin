@@ -1,138 +1,217 @@
-# TIPIZ VPS Admin Panel - Complete Setup Guide
+# TIPIZ VPS Admin — Video + Local AI Subtitle Build
 
-This document contains the complete, step-by-step instructions and all necessary terminal commands to deploy the TIPIZ VPS Admin Panel on a fresh Ubuntu VPS.
+This build keeps the existing TIPIZ admin workflow and adds local AI subtitle generation, strict subtitle validation, verified R2 subtitle uploads, and queue controls.
 
-This system handles downloading direct video links, converting them to x264 (if needed), embedding dual subtitles, uploading to Cloudflare R2, and sending to Telegram (supporting files up to 2GB via a Local Bot API Server).
+## What changed
+
+- Downloaded videos are still converted/remuxed to H.264/AAC MP4 using the existing CRF 23 / `fast` defaults.
+- While the video FFmpeg conversion is running, the worker starts audio extraction when English subtitles are missing. As soon as the audio file is ready, Faster-Whisper starts generating timestamped English subtitles while MP4 conversion continues.
+- If English subtitles already exist but Sinhala is missing, the English subtitle is translated locally to Sinhala without audio transcription.
+- If both tracks are missing, local Whisper creates English cues and the local HPLT model translates those cues to Sinhala.
+- If only Sinhala is supplied, Whisper generates the missing English track. Existing valid uploaded subtitles are not overwritten.
+- No translation API key or paid cloud translation API is used. Model files are downloaded once to `models/` and inference runs on the VPS.
+- Empty VTT files, header-only VTT files, invalid timestamps, and cue blocks without subtitle text are rejected before R2 upload.
+- R2 subtitle files are uploaded only after local validation. A `HeadObject` size check verifies uploads when the R2 key has read permission; write-only R2 credentials are allowed but will log that remote HEAD verification was skipped.
+- Queue jobs can be deleted, running jobs can be cancelled, failed jobs can be retried, and queued/history lists can be cleared.
+- Cancelled FFmpeg/Python/network subprocesses are stopped. A PM2 restart requeues an interrupted job instead of losing it.
+- Generated audio and generated subtitle temp files are cleaned. Uploaded subtitle temp files are retained for failed-job retry and deleted after success, cancellation, or manual deletion.
+
+## Subtitle decision table
+
+| Uploaded Sinhala | Uploaded English | Result |
+|---|---|---|
+| Valid | Valid | Use both uploaded tracks; no AI needed |
+| Missing/invalid | Valid | Keep English and locally translate Sinhala |
+| Valid | Missing/invalid | Keep Sinhala and locally generate English from audio |
+| Missing/invalid | Missing/invalid | Generate English from audio and translate it to Sinhala |
+
+A subtitle track that is invalid is treated as missing. If the source video has no audio stream, speech recognition cannot generate a missing track; valid uploaded tracks can still be uploaded and the job continues with an AI warning.
+
+## Models and limitations
+
+- Speech recognition: Faster-Whisper `small`, CPU INT8 by default.
+- English → Sinhala: `HPLT/translate-en-si-v2.0-hplt_opus`, converted locally to a CTranslate2 INT8 model.
+- The HPLT model is published under CC-BY-4.0. Retain attribution to HPLT when redistributing or using the model.
+- Accuracy is not guaranteed at 90% or above for every movie. Audio clarity, accents, background music, overlapping speech, names, slang, and subtitle context affect the result. Test a few episodes and review sample output before enabling fully automatic publication on the public site.
+- This is an offline runtime pipeline after the initial model download. The one-time model download requires internet access, but no paid API token.
+
+## Recommended VPS
+
+Recommended starting point: 4 vCPU and 8 GB RAM. The default Whisper `small` model and HPLT translator use CPU INT8 / low thread counts to reduce memory and CPU contention. A 2 GB VPS is not recommended: changing `WHISPER_MODEL=base` or `tiny` reduces Whisper memory only; HPLT model conversion/translation can still run out of RAM. Keep at least 3 GB of free disk space during first model setup because source and converted model files coexist in the cache.
 
 ---
 
-## Step 1: System Update & Install Dependencies
+# Updating an existing TIPIZ VPS Admin installation
 
-First, update your VPS and install the required system packages (Node.js, FFmpeg, Git, PM2, and Docker).
+> Do not overwrite your `.env`, `data/queue.json`, `temp/`, `.venv/`, or `models/`. The update commands below deliberately preserve them.
+
+## 1. Back up current project files
+
+Run on your VPS:
 
 ```bash
-# 1. Update system packages
-sudo apt update && sudo apt upgrade -y
-
-# 2. Install Node.js v20
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
-sudo apt install -y nodejs
-
-# 3. Install FFmpeg (for video processing), Git, and Docker
-sudo apt install -y ffmpeg git docker.io
-
-# 4. Enable and start Docker
-sudo systemctl enable docker
-sudo systemctl start docker
-
-# 5. Install PM2 globally (Process Manager)
-sudo npm install -g pm2
-
+cd ~/tipiz-vps-admin
+mkdir -p ~/tipiz-admin-backup-$(date +%Y%m%d-%H%M%S)
+BACKUP_DIR=$(ls -dt ~/tipiz-admin-backup-* | head -n 1)
+cp -a server.js worker.js public readme.md package.json package-lock.json "$BACKUP_DIR"/
+echo "Backup saved to: $BACKUP_DIR"
 ```
 
-## Step 2: Clone the Project & Install Node Modules
+## 2. Copy the update ZIP to the VPS
 
-Clone your GitHub repository and install all required Node.js packages.
+First install the small archive/copy utilities if they are missing, then upload `tipiz-vps-admin-ai-update.zip` to your VPS home directory using SCP, WinSCP, or your provider's file uploader. Then run:
 
 ```bash
-# Clone the repository (replace with your actual repo URL if different)
-git clone https://github.com/Oska2007/tipiz-vps-admin.git
+sudo apt update
+sudo apt install -y unzip rsync
+cd ~
+rm -rf ~/tipiz-admin-update
+mkdir -p ~/tipiz-admin-update
+unzip -o ~/tipiz-vps-admin-ai-update.zip -d ~/tipiz-admin-update
 
-# Go into the project folder
-cd tipiz-vps-admin
+rsync -av \
+  --exclude='.env' \
+  --exclude='node_modules/' \
+  --exclude='.venv/' \
+  --exclude='models/' \
+  --exclude='data/' \
+  --exclude='temp/' \
+  ~/tipiz-admin-update/tipiz-vps-admin-main/ \
+  ~/tipiz-vps-admin/
+```
 
-# Install Node.js dependencies
+If the ZIP was given a different name, change only the ZIP filename in the `unzip` command.
+
+## 3. Install/update Node dependencies
+
+```bash
+cd ~/tipiz-vps-admin
 npm install
-
 ```
 
-## Step 3: Configure Environment Variables (.env)
-
-Create the .env file to store your secret keys and configurations.
+## 4. Install local AI dependencies and download models
 
 ```bash
-nano .env
-
+sudo apt update
+sudo apt install -y python3 python3-venv ffmpeg
+cd ~/tipiz-vps-admin
+chmod +x install-ai.sh
+./install-ai.sh
 ```
 
-Copy the template below, replace the placeholder values with your actual credentials, and paste it into the editor. Then save (Ctrl + O, Enter) and exit (Ctrl + X).
+The setup downloads the Faster-Whisper model and HPLT English-to-Sinhala model, then converts HPLT to CPU INT8. This step needs internet access and may take time. It is a one-time setup unless you delete `models/`.
+
+## 5. Add AI settings to your existing `.env`
+
+Do not replace your current `.env` because it contains your login, R2, Cloudflare, and Telegram secrets. Open it:
+
+```bash
+cd ~/tipiz-vps-admin
+nano .env
+```
+
+Add these lines if they are not already present:
 
 ```ini
-PORT=3000
-
-# Cloudflare API
-CF_API_URL=https://tipiz.moviezonee.workers.dev
-CF_VPS_API_KEY=your_cloudflare_vps_api_key_here
-
-# Admin Login (Choose your own)
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=your_secure_password_here
-SESSION_SECRET=any_random_secret_string_here
-
-# Cloudflare R2 Settings
-R2_ACCESS_KEY_ID=your_r2_access_key
-R2_SECRET_ACCESS_KEY=your_r2_secret_key
-R2_ENDPOINT=https://xxxxx.r2.cloudflarestorage.com
-R2_BUCKET_NAME=tipiz-media
-
-# Telegram Settings
-TG_BOT_TOKEN=your_telegram_bot_token
-TG_CHAT_ID=-100xxxxxxxxxxx
-
-# Telegram Local API Settings (Get these from my.telegram.org)
-TELEGRAM_API_ID=your_api_id
-TELEGRAM_API_HASH=your_api_hash
-
+AI_SUBTITLES_ENABLED=true
+WHISPER_MODEL=small
+WHISPER_COMPUTE_TYPE=int8
+WHISPER_CPU_THREADS=1
+WHISPER_BEAM_SIZE=5
+TRANSLATION_REPO=HPLT/translate-en-si-v2.0-hplt_opus
+TRANSLATION_CPU_THREADS=1
+TRANSLATION_NUM_BEAMS=4
+TRANSLATION_BATCH_SIZE=4
+TRANSLATION_MAX_DECODING_LENGTH=256
+X264_PRESET=fast
+X264_CRF=23
+VIDEO_THREADS=1
 ```
 
-## Step 4: Start the Local Telegram Bot API Server (Docker)
+Save with `Ctrl+O`, Enter, then `Ctrl+X`.
 
-Run the Docker container using the credentials from your .env file. This step is crucial for uploading files larger than 50MB to Telegram.
-
-```bash
-# Ensure you are inside the tipiz-vps-admin folder
-sudo docker run -d -p 8081:8081 --name telegram-bot-api --env-file .env -e TELEGRAM_LOCAL=1 aiogram/telegram-bot-api:latest
-# Verify it is running
-sudo docker ps
-
-```
-
-## Step 5: Start the Admin Panel (PM2)
-
-Start the Node.js server using PM2 and configure it to auto-start on VPS reboot.
+## 6. Restart PM2
 
 ```bash
-sudo pm2 start server.js --name "tipiz-admin"
+cd ~/tipiz-vps-admin
+sudo pm2 restart tipiz-admin --update-env
 sudo pm2 save
-sudo pm2 startup
-
 ```
 
-## Step 6: Open Firewall Ports
-
-You must open Port 3000 to access the panel via browser.
+## 7. Verify installation
 
 ```bash
-sudo ufw allow 3000
-
+cd ~/tipiz-vps-admin
+.venv/bin/python -c "import faster_whisper, ctranslate2, sentencepiece; print('AI libraries OK')"
+node --check server.js
+node --check worker.js
+sudo pm2 logs tipiz-admin --lines 80
 ```
 
-# 🛠️ Troubleshooting & Useful Commands
+The startup log should include:
+
+```text
+TIPIZ VPS Admin listening on port 3000
+Automatic local AI subtitles: ON
+```
+
+## Queue controls in the admin page
+
+- `Delete from queue`: removes a waiting job and its uploaded temp subtitle files.
+- `Cancel job`: terminates the active FFmpeg, AI, and network processes.
+- `Retry`: requeues a failed job. Existing uploaded subtitle files are reused when available; missing tracks can be generated by AI.
+- `Remove from history`: deletes a completed/failed/cancelled queue record.
+- `Delete all queued jobs`: clears all waiting jobs.
+- `Clear completed / failed / cancelled history`: clears terminal queue records without touching active jobs. It does not delete the associated video/subtitle objects already stored in R2.
+
+## Useful commands
 
 ```bash
-# View Server Logs
+# Admin logs
 sudo pm2 logs tipiz-admin
 
-# Restart the Server (after changing .env or code)
+# Restart after .env/code changes
 sudo pm2 restart tipiz-admin --update-env
 
-# Check Docker Logs
-sudo docker logs telegram-bot-api
+# Current CPU/RAM state
+htop
+free -h
+mpstat -P ALL 1 5
 
-# Restart Docker Container
-sudo docker restart telegram-bot-api
+# Disk usage
+ df -h
+ du -sh models .venv temp data 2>/dev/null
 
-# Delete Temp Files (if disk gets full from failed jobs)
-rm -rf temp/*
+# Check services
+sudo pm2 status
+ss -lntp | grep 3000
 
+# Check the local AI Python environment
+.venv/bin/python subtitle_ai.py --help
 ```
+
+## Troubleshooting
+
+**AI subtitle warning: Python executable not found**
+
+Run `./install-ai.sh` and restart PM2. The Node worker automatically selects `.venv/bin/python` when it exists.
+
+**Model download/conversion fails**
+
+Check internet connectivity, free disk space (`df -h`), and the PM2/server logs. Run `./install-ai.sh` again; already downloaded model files are cached.
+
+**AI takes too much CPU**
+
+Keep `WHISPER_CPU_THREADS=1` and `TRANSLATION_CPU_THREADS=1`. On a small VPS use `WHISPER_MODEL=base` or `tiny`; then run the download command again with that environment setting or restart the install script after exporting it.
+
+**VTT is skipped**
+
+The validator requires at least one well-formed timestamped cue with non-empty text. A `WEBVTT` header alone is not a subtitle. This prevents empty VTT objects being uploaded to R2.
+
+**R2 HEAD verification warning**
+
+A successful PUT is retained. The warning means the R2 token may not have object-read permission for HEAD checks. Grant object read permission to the R2 token if you want remote size verification; local VTT validation still blocks empty files.
+
+**Temporarily disable AI**
+
+Set `AI_SUBTITLES_ENABLED=false` in `.env`, then run `sudo pm2 restart tipiz-admin --update-env`. Uploaded valid subtitle files will still be converted and uploaded.

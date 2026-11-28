@@ -1,5 +1,13 @@
 node_modules/
 .env
+.venv/
+models/
 temp/
+data/queue.json
+data/queue.json.tmp
+__pycache__/
+*.pyc
 *.mp4
 *.mkv
+*.wav
+*.mp3

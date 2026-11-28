@@ -1,393 +1,686 @@
 'use strict';
 
-const {
-    execFileSync,
-    spawn
-} = require('child_process');
-
+const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
-
-const {
-    pipeline
-} = require('stream/promises');
-
-const {
-    Transform
-} = require('stream');
-
+const { pipeline } = require('stream/promises');
+const { Transform } = require('stream');
 const FormData = require('form-data');
-
+const { randomUUID } = require('crypto');
 const {
     S3Client,
-    PutObjectCommand
+    PutObjectCommand,
+    HeadObjectCommand
 } = require('@aws-sdk/client-s3');
 
-const {
-    randomUUID
-} = require('crypto');
-
-// ========================================
-// CLOUDFLARE R2
-// ========================================
-
 const s3Client = new S3Client({
-
     region: 'auto',
-
     endpoint: process.env.R2_ENDPOINT,
-
     credentials: {
-
-        accessKeyId:
-            process.env.R2_ACCESS_KEY_ID,
-
-        secretAccessKey:
-            process.env.R2_SECRET_ACCESS_KEY
-
-    }
-
+        accessKeyId: process.env.R2_ACCESS_KEY_ID,
+        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY
+    },
+    maxAttempts: 3
 });
 
-// ========================================
-// SUBTITLE CONVERTER
-// ========================================
+const TEMP_DIR = path.join(__dirname, 'temp');
+const AI_SCRIPT = path.join(__dirname, 'subtitle_ai.py');
+const AI_ENABLED = String(process.env.AI_SUBTITLES_ENABLED ?? 'true').toLowerCase() !== 'false';
 
-function escapeVttText(text) {
+fs.mkdirSync(TEMP_DIR, { recursive: true });
 
-    return text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
-
+function isAborted(signal) {
+    return Boolean(signal && signal.aborted);
 }
 
-function convertSrtToVtt(sourcePath) {
-
-    if (
-        !sourcePath ||
-        path.extname(sourcePath).toLowerCase() !== '.srt'
-    ) {
-        return sourcePath;
+function throwIfAborted(signal) {
+    if (isAborted(signal)) {
+        const error = new Error('Job was cancelled.');
+        error.name = 'AbortError';
+        error.code = 'ABORT_ERR';
+        throw error;
     }
-
-    const vttPath = `${sourcePath}.vtt`;
-
-    let srt = fs.readFileSync(
-        sourcePath,
-        'utf8'
-    )
-        .replace(/^\uFEFF/, '')
-        .replace(/\r\n?/g, '\n')
-        .trim();
-
-    const cues = srt.split(/\n{2,}/)
-        .map(block => {
-
-            const lines = block.split('\n');
-
-            const index = lines.findIndex(line =>
-                /^\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s+-->/.test(line)
-            );
-
-            if (index < 0) return null;
-
-            const parts = lines[index].split(
-                /\s+-->\s+/
-            );
-
-            if (parts.length !== 2) return null;
-
-            const normalize = value =>
-                value.trim()
-                    .replace(',', '.')
-                    .replace(
-                        /(\d{2}:\d{2}:\d{2}\.\d{1,2})(?!\d)/,
-                        t => t.padEnd(12, '0')
-                    );
-
-            const endParts = parts[1].split(/\s+/);
-
-            const timing =
-                `${normalize(parts[0])} --> ` +
-                `${normalize(endParts[0])}` +
-                (
-                    endParts.length > 1
-                        ? ' ' + endParts.slice(1).join(' ')
-                        : ''
-                );
-
-            return (
-                `${timing}\n` +
-                escapeVttText(
-                    lines.slice(index + 1).join('\n').trim()
-                )
-            );
-
-        })
-        .filter(Boolean);
-
-    fs.writeFileSync(
-        vttPath,
-        `WEBVTT\n\n${cues.join('\n\n')}\n`,
-        'utf8'
-    );
-
-    return vttPath;
-
 }
 
-// ========================================
-// VIDEO INFORMATION
-// ========================================
-
-function getVideoInfo(filePath) {
-
-    const result = execFileSync(
-
-        'ffprobe',
-
-        [
-            '-v',
-            'error',
-
-            '-show_entries',
-
-            'format=format_name,duration:stream=index,codec_type,codec_name,profile',
-
-            '-of',
-            'json',
-
-            filePath
-        ],
-
-        {
-            encoding: 'utf8',
-            maxBuffer: 10 * 1024 * 1024
-        }
-
+function isAbortError(error, signal) {
+    return Boolean(
+        isAborted(signal) ||
+        error?.name === 'AbortError' ||
+        error?.code === 'ABORT_ERR' ||
+        error?.code === 'ERR_CANCELED'
     );
-
-    return JSON.parse(result);
-
 }
 
-// ========================================
-// FFMPEG PROGRESS
-// ========================================
+function pythonExecutable() {
+    const venvPython = path.join(__dirname, '.venv', 'bin', 'python');
+    if (fs.existsSync(venvPython)) return venvPython;
+    return process.env.PYTHON_BIN || 'python3';
+}
 
-function runFFmpeg(
-    args,
-    duration,
-    updateStatus,
-    label
-) {
+function updateProgressSafely(callback, ...args) {
+    try {
+        if (typeof callback === 'function') callback(...args);
+    } catch (error) {
+        console.warn('Progress update failed:', error.message);
+    }
+}
+
+function runProcess(command, args, options = {}) {
+    const {
+        signal,
+        onStdoutLine,
+        label = command,
+        env = process.env
+    } = options;
 
     return new Promise((resolve, reject) => {
+        throwIfAborted(signal);
 
-        const ffmpeg = spawn(
-            'ffmpeg',
-            args,
-            {
-                stdio: [
-                    'ignore',
-                    'pipe',
-                    'pipe'
-                ]
+        const child = spawn(command, args, {
+            cwd: __dirname,
+            env,
+            stdio: ['ignore', 'pipe', 'pipe']
+        });
+
+        let stdoutBuffer = '';
+        let stderrBuffer = '';
+        let settled = false;
+        let killTimer = null;
+
+        const finish = (error, result) => {
+            if (settled) return;
+            settled = true;
+            if (killTimer) clearTimeout(killTimer);
+            if (signal) signal.removeEventListener('abort', onAbort);
+            if (error) reject(error);
+            else resolve(result);
+        };
+
+        const onAbort = () => {
+            try { child.kill('SIGTERM'); } catch (_) {}
+            killTimer = setTimeout(() => {
+                try { child.kill('SIGKILL'); } catch (_) {}
+            }, 7000);
+            killTimer.unref?.();
+        };
+
+        if (signal) {
+            signal.addEventListener('abort', onAbort, { once: true });
+            if (signal.aborted) onAbort();
+        }
+
+        child.stdout.on('data', chunk => {
+            stdoutBuffer += chunk.toString('utf8');
+            const lines = stdoutBuffer.split(/\r?\n/);
+            stdoutBuffer = lines.pop() || '';
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                if (typeof onStdoutLine === 'function') {
+                    try { onStdoutLine(line); } catch (_) {}
+                } else {
+                    console.log(`[${label}] ${line}`);
+                }
             }
-        );
+        });
+
+        child.stderr.on('data', chunk => {
+            stderrBuffer += chunk.toString('utf8');
+            if (stderrBuffer.length > 16000) {
+                stderrBuffer = stderrBuffer.slice(-16000);
+            }
+        });
+
+        child.on('error', error => {
+            if (isAbortError(error, signal)) {
+                const cancelled = new Error('Job was cancelled.');
+                cancelled.name = 'AbortError';
+                cancelled.code = 'ABORT_ERR';
+                finish(cancelled);
+            } else {
+                finish(error);
+            }
+        });
+
+        child.on('close', code => {
+            if (isAborted(signal)) {
+                const cancelled = new Error('Job was cancelled.');
+                cancelled.name = 'AbortError';
+                cancelled.code = 'ABORT_ERR';
+                return finish(cancelled);
+            }
+
+            if (code === 0) {
+                if (stdoutBuffer.trim() && typeof onStdoutLine === 'function') {
+                    try { onStdoutLine(stdoutBuffer.trim()); } catch (_) {}
+                }
+                return finish(null, { code: 0, stderr: stderrBuffer });
+            }
+
+            finish(new Error(
+                `${label} exited with code ${code}: ${stderrBuffer.slice(-3000) || 'No error output.'}`
+            ));
+        });
+    });
+}
+
+function runFFmpeg(args, duration, updateStatus, label, options = {}) {
+    const { signal, progressStart = 30, progressRange = 35 } = options;
+
+    return new Promise((resolve, reject) => {
+        throwIfAborted(signal);
+
+        const ffmpeg = spawn('ffmpeg', ['-hide_banner', '-nostdin', ...args], {
+            stdio: ['ignore', 'pipe', 'pipe']
+        });
 
         let progressBuffer = '';
         let errorBuffer = '';
+        let settled = false;
+        let killTimer = null;
 
-        ffmpeg.stdout.on('data', data => {
+        const finish = error => {
+            if (settled) return;
+            settled = true;
+            if (killTimer) clearTimeout(killTimer);
+            if (signal) signal.removeEventListener('abort', onAbort);
+            if (error) reject(error);
+            else resolve();
+        };
 
-            progressBuffer += data.toString();
+        const onAbort = () => {
+            try { ffmpeg.kill('SIGTERM'); } catch (_) {}
+            killTimer = setTimeout(() => {
+                try { ffmpeg.kill('SIGKILL'); } catch (_) {}
+            }, 7000);
+            killTimer.unref?.();
+        };
 
-            const lines = progressBuffer.split('\n');
-
-            progressBuffer = lines.pop();
-
-            for (const line of lines) {
-
-                if (!line.startsWith('out_time_ms=')) {
-                    continue;
-                }
-
-                const value = Number(
-                    line.slice('out_time_ms='.length)
-                );
-
-                if (
-                    duration > 0 &&
-                    Number.isFinite(value)
-                ) {
-
-                    const fraction = Math.max(
-                        0,
-                        Math.min(
-                            1,
-                            value / 1000000 / duration
-                        )
-                    );
-
-                    updateStatus(
-                        label,
-                        30 + fraction * 35,
-                        {
-                            detail:
-                                `${Math.round(fraction * 100)}% of video timeline`
-                        }
-                    );
-
-                }
-
-            }
-
-        });
-
-        ffmpeg.stderr.on('data', data => {
-
-            errorBuffer += data.toString();
-
-            if (errorBuffer.length > 12000) {
-                errorBuffer = errorBuffer.slice(-12000);
-            }
-
-        });
-
-        ffmpeg.on('error', reject);
-
-        ffmpeg.on('close', code => {
-
-            if (code === 0) {
-                resolve();
-            } else {
-
-                reject(
-                    new Error(
-                        `FFmpeg exited with code ${code}: ` +
-                        errorBuffer.slice(-2500)
-                    )
-                );
-
-            }
-
-        });
-
-    });
-
-}
-
-// ========================================
-// STREAM PROGRESS
-// ========================================
-
-function makeProgressTransform(total, onProgress) {
-
-    let loaded = 0;
-
-    return new Transform({
-
-        transform(chunk, enc, cb) {
-
-            loaded += chunk.length;
-
-            onProgress(
-                loaded,
-                total || null
-            );
-
-            cb(null, chunk);
-
+        if (signal) {
+            signal.addEventListener('abort', onAbort, { once: true });
+            if (signal.aborted) onAbort();
         }
 
-    });
+        ffmpeg.stdout.on('data', chunk => {
+            progressBuffer += chunk.toString('utf8');
+            const lines = progressBuffer.split('\n');
+            progressBuffer = lines.pop() || '';
 
+            for (const line of lines) {
+                if (!line.startsWith('out_time_ms=')) continue;
+                const value = Number(line.slice('out_time_ms='.length));
+                if (duration > 0 && Number.isFinite(value)) {
+                    const fraction = Math.max(0, Math.min(1, value / 1000000 / duration));
+                    updateProgressSafely(updateStatus, label, progressStart + fraction * progressRange, {
+                        detail: `${Math.round(fraction * 100)}% of video timeline`
+                    });
+                }
+            }
+        });
+
+        ffmpeg.stderr.on('data', chunk => {
+            errorBuffer += chunk.toString('utf8');
+            if (errorBuffer.length > 16000) errorBuffer = errorBuffer.slice(-16000);
+        });
+
+        ffmpeg.on('error', error => {
+            if (isAbortError(error, signal)) {
+                const cancelled = new Error('Job was cancelled.');
+                cancelled.name = 'AbortError';
+                cancelled.code = 'ABORT_ERR';
+                finish(cancelled);
+            } else {
+                finish(error);
+            }
+        });
+
+        ffmpeg.on('close', code => {
+            if (isAborted(signal)) {
+                const cancelled = new Error('Job was cancelled.');
+                cancelled.name = 'AbortError';
+                cancelled.code = 'ABORT_ERR';
+                return finish(cancelled);
+            }
+            if (code === 0) return finish();
+            finish(new Error(
+                `FFmpeg exited with code ${code}: ${errorBuffer.slice(-3000) || 'No error output.'}`
+            ));
+        });
+    });
 }
 
-// ========================================
-// R2 UPLOAD
-// ========================================
+function getVideoInfo(filePath) {
+    const result = execFileSync('ffprobe', [
+        '-v', 'error',
+        '-show_entries', 'format=format_name,duration:stream=index,codec_type,codec_name,profile',
+        '-of', 'json',
+        filePath
+    ], {
+        encoding: 'utf8',
+        maxBuffer: 10 * 1024 * 1024
+    });
+    return JSON.parse(result);
+}
 
-async function uploadR2(
-    filePath,
-    key,
-    contentType,
-    onProgress
-) {
+function makeProgressTransform(total, onProgress) {
+    let loaded = 0;
+    return new Transform({
+        transform(chunk, enc, callback) {
+            loaded += chunk.length;
+            onProgress(loaded, total || null);
+            callback(null, chunk);
+        }
+    });
+}
 
-    const size = fs.statSync(filePath).size;
+async function uploadR2(filePath, key, contentType, onProgress, signal) {
+    throwIfAborted(signal);
+
+    const stat = fs.statSync(filePath);
+    const size = stat.size;
+    if (!size || !stat.isFile()) {
+        throw new Error(`Refusing to upload an empty or invalid file: ${filePath}`);
+    }
 
     let loaded = 0;
-
     let lastAt = Date.now();
     let lastLoaded = 0;
 
     const meter = new Transform({
-
-        transform(chunk, enc, cb) {
-
+        transform(chunk, enc, callback) {
             loaded += chunk.length;
-
             const now = Date.now();
-
-            const speed =
-                now - lastAt >= 1000
-                    ? (
-                        (loaded - lastLoaded) /
-                        ((now - lastAt) / 1000)
-                    )
-                    : null;
-
-            onProgress(
-                loaded,
-                size,
-                speed
-            );
-
+            const speed = now - lastAt >= 1000
+                ? (loaded - lastLoaded) / ((now - lastAt) / 1000)
+                : null;
+            updateProgressSafely(onProgress, loaded, size, speed);
             if (now - lastAt >= 1000) {
-
                 lastAt = now;
                 lastLoaded = loaded;
-
             }
-
-            cb(null, chunk);
-
+            callback(null, chunk);
         }
-
     });
 
-    await s3Client.send(
+    await s3Client.send(new PutObjectCommand({
+        Bucket: process.env.R2_BUCKET_NAME,
+        Key: key,
+        Body: fs.createReadStream(filePath).pipe(meter),
+        ContentLength: size,
+        ContentType: contentType,
+        CacheControl: contentType === 'text/vtt' ? 'public, max-age=3600' : 'public, max-age=31536000, immutable'
+    }), signal ? { abortSignal: signal } : undefined);
 
-        new PutObjectCommand({
+    throwIfAborted(signal);
 
+    // R2 HEAD verification catches truncated/mismatched objects. If the R2 key
+    // is write-only, keep the successful PUT and log that HEAD verification was unavailable.
+    try {
+        const head = await s3Client.send(new HeadObjectCommand({
             Bucket: process.env.R2_BUCKET_NAME,
+            Key: key
+        }), signal ? { abortSignal: signal } : undefined);
 
-            Key: key,
+        if (Number.isFinite(head.ContentLength) && head.ContentLength !== size) {
+            throw new Error(`R2 verification failed for ${key}: expected ${size} bytes, found ${head.ContentLength}.`);
+        }
+    } catch (error) {
+        const statusCode = error?.$metadata?.httpStatusCode;
+        const code = error?.name || error?.Code;
+        if (statusCode === 403 || code === 'AccessDenied') {
+            console.warn(`R2 HEAD verification skipped for ${key}: credentials do not have read permission.`);
+        } else {
+            throw error;
+        }
+    }
 
-            Body: fs.createReadStream(filePath).pipe(meter),
-
-            ContentLength: size,
-
-            ContentType: contentType
-
-        })
-
-    );
-
-    onProgress(size, size, 0);
-
+    updateProgressSafely(onProgress, size, size, 0);
 }
 
-// ========================================
-// MAIN PROCESS
-// ========================================
+function normalizeTimestamp(value) {
+    const match = String(value).trim().replace(',', '.').match(/^(?:(\d{1,2}):)?(\d{2}):(\d{2})\.(\d{1,3})$/);
+    if (!match) return null;
+    const hours = String(match[1] || '00').padStart(2, '0');
+    const minutes = match[2];
+    const seconds = match[3];
+    const millis = String(match[4]).padEnd(3, '0');
+    return `${hours}:${minutes}:${seconds}.${millis}`;
+}
+
+function timestampToMs(value) {
+    const normalized = normalizeTimestamp(value);
+    if (!normalized) return null;
+    const [clock, ms] = normalized.split('.');
+    const [hours, minutes, seconds] = clock.split(':').map(Number);
+    return ((hours * 3600 + minutes * 60 + seconds) * 1000) + Number(ms);
+}
+
+function escapeVttText(text) {
+    return String(text)
+        .replace(/&(?!amp;|lt;|gt;|quot;|#\d+;|#x[\da-f]+;)/gi, '&amp;')
+        .replace(/</g, match => match)
+        .replace(/>/g, match => match);
+}
+
+function parseSubtitleBlocks(text) {
+    const normalized = String(text)
+        .replace(/^\uFEFF/, '')
+        .replace(/\r\n?/g, '\n')
+        .trim();
+
+    const blocks = normalized.split(/\n\s*\n/);
+    const cues = [];
+
+    for (const block of blocks) {
+        const lines = block.split('\n');
+        const timingIndex = lines.findIndex(line => /-->/u.test(line));
+        if (timingIndex < 0) continue;
+
+        const timingLine = lines[timingIndex].trim();
+        const timingMatch = timingLine.match(/^((?:\d{1,2}:)?\d{2}:\d{2}[,.]\d{1,3})\s+-->\s+((?:\d{1,2}:)?\d{2}:\d{2}[,.]\d{1,3})(?:\s+.*)?$/);
+        if (!timingMatch) continue;
+
+        const start = normalizeTimestamp(timingMatch[1]);
+        const endToken = timingMatch[2].trim().split(/\s+/)[0];
+        const end = normalizeTimestamp(endToken);
+        if (!start || !end) continue;
+        if (timestampToMs(end) <= timestampToMs(start)) continue;
+
+        const body = lines.slice(timingIndex + 1).join('\n').trim();
+        const plain = body
+            .replace(/<[^>]*>/g, '')
+            .replace(/&nbsp;/gi, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        if (!plain) continue;
+
+        cues.push({
+            start,
+            end,
+            text: body
+        });
+    }
+
+    return cues;
+}
+
+function validateSubtitleFile(filePath) {
+    if (!filePath || !fs.existsSync(filePath)) {
+        return { valid: false, reason: 'Subtitle file is missing.', cueCount: 0 };
+    }
+
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile() || stat.size < 10) {
+        return { valid: false, reason: 'Subtitle file is empty or too small.', cueCount: 0 };
+    }
+
+    if (stat.size > 50 * 1024 * 1024) {
+        return { valid: false, reason: 'Subtitle file is larger than 50 MB.', cueCount: 0 };
+    }
+
+    const text = fs.readFileSync(filePath, 'utf8');
+    const cues = parseSubtitleBlocks(text);
+    if (cues.length === 0) {
+        return { valid: false, reason: 'No valid timestamped subtitle cues with text were found.', cueCount: 0 };
+    }
+
+    return { valid: true, cueCount: cues.length, cues };
+}
+
+function convertSrtToVtt(sourcePath) {
+    if (!sourcePath || !fs.existsSync(sourcePath)) return null;
+
+    const ext = path.extname(sourcePath).toLowerCase();
+    if (!['.srt', '.vtt'].includes(ext)) return null;
+
+    const sourceText = fs.readFileSync(sourcePath, 'utf8')
+        .replace(/^\uFEFF/, '')
+        .replace(/\r\n?/g, '\n')
+        .trim();
+
+    const cues = parseSubtitleBlocks(sourceText);
+    if (cues.length === 0) return null;
+
+    const vttPath = ext === '.vtt'
+        ? `${sourcePath}.normalized.vtt`
+        : `${sourcePath}.vtt`;
+
+    const vtt = [
+        'WEBVTT',
+        '',
+        ...cues.flatMap(cue => [
+            `${cue.start} --> ${cue.end}`,
+            escapeVttText(cue.text),
+            ''
+        ])
+    ].join('\n').trimEnd() + '\n';
+
+    fs.writeFileSync(vttPath, vtt, 'utf8');
+
+    const validation = validateSubtitleFile(vttPath);
+    if (!validation.valid) {
+        try { fs.unlinkSync(vttPath); } catch (_) {}
+        return null;
+    }
+
+    return vttPath;
+}
+
+function emitSubtitleStatus(updateSubtitleStatus, state, stage, detail = '', progress = null) {
+    updateProgressSafely(updateSubtitleStatus, {
+        state,
+        stage,
+        detail,
+        progress,
+        updatedAt: new Date().toISOString()
+    });
+}
+
+function buildPythonEnvironment() {
+    const env = { ...process.env };
+    const modelDir = path.join(__dirname, 'models');
+    env.HF_HOME = env.HF_HOME || path.join(modelDir, 'huggingface');
+    env.HUGGINGFACE_HUB_CACHE = env.HUGGINGFACE_HUB_CACHE || path.join(env.HF_HOME, 'hub');
+    env.TRANSFORMERS_CACHE = env.TRANSFORMERS_CACHE || path.join(env.HF_HOME, 'transformers');
+    env.FASTER_WHISPER_CACHE = env.FASTER_WHISPER_CACHE || path.join(modelDir, 'faster-whisper');
+    env.PYTHONUNBUFFERED = '1';
+    return env;
+}
+
+async function runSubtitleAI(args, signal, updateSubtitleStatus) {
+    const env = buildPythonEnvironment();
+    return runProcess(pythonExecutable(), [AI_SCRIPT, ...args], {
+        signal,
+        env,
+        label: 'Subtitle AI',
+        onStdoutLine(line) {
+            try {
+                const event = JSON.parse(line);
+                if (event.event === 'progress') {
+                    emitSubtitleStatus(
+                        updateSubtitleStatus,
+                        'processing',
+                        event.stage || 'AI subtitle processing',
+                        event.detail || '',
+                        Number.isFinite(event.progress) ? event.progress : null
+                    );
+                } else if (event.event === 'message') {
+                    console.log(`[Subtitle AI] ${event.message}`);
+                }
+            } catch (_) {
+                console.log(`[Subtitle AI] ${line}`);
+            }
+        }
+    });
+}
+
+async function prepareSubtitles({
+    subtitle1,
+    subtitle2,
+    rawPath,
+    hasAudio,
+    id,
+    signal,
+    updateSubtitleStatus
+}) {
+    const generatedFiles = [];
+    let sinVtt = null;
+    let engVtt = null;
+    let audioPath = path.join(TEMP_DIR, `audio_${id}.mp3`);
+    let engSrtPath = path.join(TEMP_DIR, `ai_eng_${id}.srt`);
+    let sinSrtPath = path.join(TEMP_DIR, `ai_sin_${id}.srt`);
+
+    try {
+        emitSubtitleStatus(updateSubtitleStatus, 'checking', 'Checking uploaded subtitles', 'Validating SRT/VTT files.', 5);
+
+        if (subtitle1) {
+            const validation = validateSubtitleFile(subtitle1);
+            if (validation.valid) {
+                sinVtt = convertSrtToVtt(subtitle1);
+                if (sinVtt) generatedFiles.push(sinVtt);
+            } else {
+                console.warn(`Sinhala subtitle ignored: ${validation.reason}`);
+                emitSubtitleStatus(updateSubtitleStatus, 'warning', 'Invalid Sinhala subtitle ignored', validation.reason, 8);
+            }
+        }
+
+        if (subtitle2) {
+            const validation = validateSubtitleFile(subtitle2);
+            if (validation.valid) {
+                engVtt = convertSrtToVtt(subtitle2);
+                if (engVtt) generatedFiles.push(engVtt);
+            } else {
+                console.warn(`English subtitle ignored: ${validation.reason}`);
+                emitSubtitleStatus(updateSubtitleStatus, 'warning', 'Invalid English subtitle ignored', validation.reason, 8);
+            }
+        }
+
+        if (sinVtt && engVtt) {
+            emitSubtitleStatus(updateSubtitleStatus, 'ready', 'Uploaded subtitles validated', 'Both Sinhala and English subtitles are ready.', 100);
+            return { sinVtt, engVtt, generatedFiles, audioPath: null };
+        }
+
+        if (!AI_ENABLED) {
+            emitSubtitleStatus(updateSubtitleStatus, 'disabled', 'Automatic subtitles disabled', 'Set AI_SUBTITLES_ENABLED=true in .env to enable local AI subtitles.', 100);
+            return { sinVtt, engVtt, generatedFiles, audioPath: null };
+        }
+
+        let englishForTranslation = engVtt;
+
+        // If the English track is absent, first extract a small mono audio file,
+        // then run Whisper while the video FFmpeg conversion is still running.
+        if (!engVtt) {
+            if (!hasAudio) {
+                throw new Error('The video has no audio stream, so AI cannot generate subtitles.');
+            }
+
+            throwIfAborted(signal);
+            emitSubtitleStatus(updateSubtitleStatus, 'processing', 'Extracting audio for AI subtitles', 'Running audio extraction alongside MP4 conversion.', 12);
+
+            await runFFmpeg([
+                '-y', '-i', rawPath,
+                '-map', '0:a:0',
+                '-vn',
+                '-ac', '1',
+                '-ar', '16000',
+                '-c:a', 'libmp3lame',
+                '-b:a', '48k',
+                '-threads', '1',
+                audioPath
+            ], 0, () => {}, 'Extracting audio', { signal });
+
+            if (!fs.existsSync(audioPath) || fs.statSync(audioPath).size < 1000) {
+                throw new Error('Audio extraction did not produce a usable audio file.');
+            }
+
+            emitSubtitleStatus(updateSubtitleStatus, 'processing', 'AI is generating English subtitles', 'Faster-Whisper is processing the extracted audio.', 25);
+
+            await runSubtitleAI([
+                'generate',
+                '--audio', audioPath,
+                '--output', engSrtPath
+            ], signal, updateSubtitleStatus);
+
+            generatedFiles.push(engSrtPath);
+            engVtt = convertSrtToVtt(engSrtPath);
+            if (!engVtt || !validateSubtitleFile(engVtt).valid) {
+                throw new Error('AI did not produce a valid English subtitle file.');
+            }
+            generatedFiles.push(engVtt);
+            englishForTranslation = engVtt;
+        }
+
+        // If Sinhala is missing, translate an existing uploaded English subtitle
+        // or the English transcript generated above. No cloud API is used.
+        if (!sinVtt && englishForTranslation) {
+            throwIfAborted(signal);
+            emitSubtitleStatus(updateSubtitleStatus, 'processing', 'AI is translating English to Sinhala', 'Using the local offline translation model.', 65);
+
+            await runSubtitleAI([
+                'translate',
+                '--input', englishForTranslation,
+                '--output', sinSrtPath
+            ], signal, updateSubtitleStatus);
+
+            generatedFiles.push(sinSrtPath);
+            sinVtt = convertSrtToVtt(sinSrtPath);
+            if (!sinVtt || !validateSubtitleFile(sinVtt).valid) {
+                throw new Error('AI did not produce a valid Sinhala subtitle file.');
+            }
+            generatedFiles.push(sinVtt);
+        }
+
+        const readyCount = Number(Boolean(sinVtt)) + Number(Boolean(engVtt));
+        emitSubtitleStatus(
+            updateSubtitleStatus,
+            readyCount === 2 ? 'ready' : 'partial',
+            readyCount === 2 ? 'AI subtitles ready' : 'Some subtitles are ready',
+            `${readyCount}/2 subtitle tracks validated and ready for R2 upload.`,
+            100
+        );
+
+        return { sinVtt, engVtt, generatedFiles, audioPath };
+
+    } catch (error) {
+        if (isAbortError(error, signal)) {
+            // The caller may be cancelling the job while a subprocess is active.
+            // Remove all subtitle-only temporary files before propagating cancel.
+            const disposable = [audioPath, engSrtPath, sinSrtPath, ...generatedFiles];
+            for (const file of new Set(disposable.filter(Boolean))) {
+                try {
+                    if (fs.existsSync(file) && fs.statSync(file).isFile()) fs.unlinkSync(file);
+                } catch (cleanupError) {
+                    console.warn(`Subtitle cancellation cleanup failed for ${file}:`, cleanupError.message);
+                }
+            }
+            throw error;
+        }
+        console.error('Subtitle AI failed:', error.stack || error.message);
+        emitSubtitleStatus(updateSubtitleStatus, 'warning', 'Automatic subtitle generation failed', error.message, null);
+        return { sinVtt, engVtt, generatedFiles, audioPath };
+    }
+}
+
+function makeTelegramForm({ title, permanentId, outPath, thumbPath, duration }) {
+    const form = new FormData();
+    form.append('chat_id', process.env.TG_CHAT_ID);
+    form.append('video', fs.createReadStream(outPath), {
+        filename: `${permanentId}.mp4`,
+        contentType: 'video/mp4'
+    });
+    form.append('caption', `🎬 ${title}\nID: ${permanentId}`);
+    form.append('supports_streaming', 'true');
+
+    if (fs.existsSync(thumbPath)) {
+        form.append('thumbnail', fs.createReadStream(thumbPath));
+    }
+    if (duration > 0) {
+        form.append('duration', String(Math.round(duration)));
+    }
+    return form;
+}
 
 async function processVideo(jobData) {
-
     const {
         title,
         url,
@@ -395,253 +688,156 @@ async function processVideo(jobData) {
         subtitle2
     } = jobData;
 
-    const updateStatus =
-        typeof jobData.updateStatus === 'function'
-            ? jobData.updateStatus
-            : () => {};
+    const updateStatus = typeof jobData.updateStatus === 'function'
+        ? jobData.updateStatus
+        : () => {};
+    const updateSubtitleStatus = typeof jobData.updateSubtitleStatus === 'function'
+        ? jobData.updateSubtitleStatus
+        : () => {};
+    const signal = jobData.signal;
 
-    const tempDir = path.join(
-        __dirname,
-        'temp'
-    );
-
-    fs.mkdirSync(tempDir, {
-        recursive: true
-    });
+    fs.mkdirSync(TEMP_DIR, { recursive: true });
 
     const id = randomUUID();
+    const rawPath = path.join(TEMP_DIR, `raw_${id}.bin`);
+    const outPath = path.join(TEMP_DIR, `out_${id}.mp4`);
+    const thumbPath = path.join(TEMP_DIR, `thumb_${id}.jpg`);
 
-    const rawPath = path.join(
-        tempDir,
-        `raw_${id}.bin`
-    );
-
-    const outPath = path.join(
-        tempDir,
-        `out_${id}.mp4`
-    );
-
-    const thumbPath = path.join(
-        tempDir,
-        `thumb_${id}.jpg`
-    );
-
-    let sub1Vtt = null;
-    let sub2Vtt = null;
-
+    let subtitles = null;
+    let subtitlePromise = null;
+    let subtitleController = null;
+    let unlinkSubtitleAbort = null;
     let permanentId = null;
     let telegramFileId = null;
-
     let completed = false;
 
     try {
-
         console.log(`\n[Job Started] ${title}`);
+        throwIfAborted(signal);
 
-        // ========================================
-        // 1. DOWNLOAD
-        // ========================================
-
-        updateStatus(
-            'Downloading video',
-            0,
-            {
-                detail: 'Connecting to source…',
-                speed: null
-            }
-        );
-
-        const response = await axios({
-
-            url,
-
-            method: 'GET',
-
-            responseType: 'stream',
-
-            headers: {
-                'User-Agent': 'Mozilla/5.0'
-            },
-
-            maxContentLength: Infinity,
-
-            maxBodyLength: Infinity,
-
-            timeout: 0,
-
-            validateStatus: status =>
-                status >= 200 && status < 300
-
+        // 1. Download
+        updateStatus('Downloading video', 0, {
+            detail: 'Connecting to source…',
+            speed: null
         });
 
-        const total =
-            Number(response.headers['content-length']) ||
-            null;
+        const response = await axios({
+            url,
+            method: 'GET',
+            responseType: 'stream',
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+            timeout: 0,
+            signal,
+            validateStatus: status => status >= 200 && status < 300
+        });
 
+        const total = Number(response.headers['content-length']) || null;
         let lastAt = Date.now();
         let lastBytes = 0;
 
-        const meter = makeProgressTransform(
-            total,
-
-            (loaded, expected) => {
-
-                const now = Date.now();
-
-                let speed = null;
-
-                if (now - lastAt >= 1000) {
-
-                    speed =
-                        (loaded - lastBytes) /
-                        ((now - lastAt) / 1000);
-
-                    lastAt = now;
-                    lastBytes = loaded;
-
-                }
-
-                updateStatus(
-                    'Downloading video',
-
-                    expected
-                        ? 25 * loaded / expected
-                        : null,
-
-                    {
-                        loadedBytes: loaded,
-                        totalBytes: expected,
-                        speed
-                    }
-                );
-
+        const meter = makeProgressTransform(total, (loaded, expected) => {
+            const now = Date.now();
+            let speed = null;
+            if (now - lastAt >= 1000) {
+                speed = (loaded - lastBytes) / ((now - lastAt) / 1000);
+                lastAt = now;
+                lastBytes = loaded;
             }
-        );
+            updateStatus('Downloading video', expected ? 25 * loaded / expected : null, {
+                loadedBytes: loaded,
+                totalBytes: expected,
+                speed
+            });
+        });
 
-        await pipeline(
-            response.data,
-            meter,
-            fs.createWriteStream(rawPath)
-        );
+        await pipeline(response.data, meter, fs.createWriteStream(rawPath), { signal });
+        throwIfAborted(signal);
 
-        updateStatus(
-            'Download complete — checking codecs',
-            26,
-            {
-                loadedBytes: fs.statSync(rawPath).size,
-                totalBytes: fs.statSync(rawPath).size,
-                speed: 0
-            }
-        );
+        const downloadedSize = fs.statSync(rawPath).size;
+        if (downloadedSize < 1024) throw new Error('Downloaded video is empty or too small.');
 
-        // ========================================
-        // 2. CHECK VIDEO CODECS
-        // ========================================
+        updateStatus('Download complete — checking codecs', 26, {
+            loadedBytes: downloadedSize,
+            totalBytes: downloadedSize,
+            speed: 0
+        });
 
+        // 2. Inspect source
         const info = getVideoInfo(rawPath);
+        const video = (info.streams || []).find(stream => stream.codec_type === 'video');
+        const audio = (info.streams || []).find(stream => stream.codec_type === 'audio');
+        if (!video) throw new Error('No video stream found in downloaded file.');
 
-        const video = info.streams.find(
-            s => s.codec_type === 'video'
-        );
-
-        const audio = info.streams.find(
-            s => s.codec_type === 'audio'
-        );
-
-        if (!video) {
-            throw new Error(
-                'No video stream found in downloaded file.'
-            );
-        }
-
-        const duration =
-            Number(info.format.duration) || 0;
-
-        const isMp4 =
-            (info.format.format_name || '')
-                .split(',')
-                .includes('mp4');
-
-        const isH264 =
-            video.codec_name === 'h264';
-
-        const isAacLc =
-            audio?.codec_name === 'aac' &&
-            audio?.profile === 'LC';
-
+        const duration = Number(info.format?.duration) || 0;
+        const isMp4 = (info.format?.format_name || '').split(',').includes('mp4');
+        const isH264 = video.codec_name === 'h264';
+        const isAacLc = audio?.codec_name === 'aac' && audio?.profile === 'LC';
         let mode;
 
-        // ========================================
-        // 3. CONVERSION
-        // ========================================
+        // Start subtitle work before video conversion. Audio extraction and AI
+        // transcription continue in parallel with the H.264/AAC FFmpeg job.
+        subtitleController = new AbortController();
+        const abortSubtitleWork = () => subtitleController.abort();
+        if (signal) {
+            if (signal.aborted) abortSubtitleWork();
+            else {
+                signal.addEventListener('abort', abortSubtitleWork, { once: true });
+                unlinkSubtitleAbort = () => signal.removeEventListener('abort', abortSubtitleWork);
+            }
+        }
 
+        subtitlePromise = prepareSubtitles({
+            subtitle1,
+            subtitle2,
+            rawPath,
+            hasAudio: Boolean(audio),
+            id,
+            signal: subtitleController.signal,
+            updateSubtitleStatus
+        });
+        // Attach a rejection handler immediately because video conversion may
+        // fail before the parallel subtitle task has finished.
+        subtitlePromise.catch(() => {});
+
+        // 3. Convert/remux video
         if (isMp4 && isH264 && isAacLc) {
-
             mode = 'ORIGINAL_COPY';
-
-            updateStatus(
-                'Compatible H.264/AAC MP4 — keeping original quality',
-                65,
-                {
-                    detail: 'No re-encoding required'
-                }
-            );
-
+            updateStatus('Compatible H.264/AAC MP4 — keeping original quality', 65, {
+                detail: 'No re-encoding required'
+            });
             await pipeline(
                 fs.createReadStream(rawPath),
-                fs.createWriteStream(outPath)
+                fs.createWriteStream(outPath),
+                { signal }
             );
-
         } else {
-
-            mode =
-                isMp4 && isH264
-                    ? 'AUDIO_ONLY'
-                    : 'FULL_CONVERSION';
-
+            mode = isMp4 && isH264 ? 'AUDIO_ONLY' : 'FULL_CONVERSION';
             const args = [
                 '-y',
-                '-i',
-                rawPath,
-                '-map',
-                '0:v:0',
-                '-map',
-                '0:a:0?'
+                '-i', rawPath,
+                '-map', '0:v:0',
+                '-map', '0:a:0?'
             ];
 
             if (mode === 'AUDIO_ONLY') {
-
-                args.push(
-                    '-c:v',
-                    'copy'
-                );
-
+                args.push('-c:v', 'copy');
             } else {
-
                 args.push(
-                    '-c:v',
-                    'libx264',
-                    '-preset',
-                    'fast',
-                    '-crf',
-                    '23',
-                    '-threads',
-                    '1'
+                    '-c:v', 'libx264',
+                    '-preset', process.env.X264_PRESET || 'fast',
+                    '-crf', process.env.X264_CRF || '23',
+                    '-threads', process.env.VIDEO_THREADS || '1'
                 );
-
             }
 
             args.push(
-                '-c:a',
-                'aac',
-                '-b:a',
-                '160k',
-                '-ac',
-                '2',
-                '-movflags',
-                '+faststart',
-                '-progress',
-                'pipe:1',
+                '-c:a', 'aac',
+                '-b:a', '160k',
+                '-ac', '2',
+                '-movflags', '+faststart',
+                '-progress', 'pipe:1',
                 '-nostats',
                 outPath
             );
@@ -650,458 +846,194 @@ async function processVideo(jobData) {
                 args,
                 duration,
                 updateStatus,
-
-                mode === 'AUDIO_ONLY'
-                    ? 'Converting audio to AAC'
-                    : 'Converting video to H.264 MP4'
+                mode === 'AUDIO_ONLY' ? 'Converting audio to AAC' : 'Converting video to H.264 MP4',
+                { signal, progressStart: 30, progressRange: 35 }
             );
-
         }
 
-        if (
-            !fs.existsSync(outPath) ||
-            fs.statSync(outPath).size === 0
-        ) {
-            throw new Error(
-                'Output MP4 was not created or is empty.'
-            );
+        throwIfAborted(signal);
+        if (!fs.existsSync(outPath) || fs.statSync(outPath).size === 0) {
+            throw new Error('Output MP4 was not created or is empty.');
         }
 
         const fileSize = fs.statSync(outPath).size;
+        console.log(`Processing mode: ${mode}; output ${(fileSize / 1048576).toFixed(2)} MB`);
 
-        console.log(
-            `Processing mode: ${mode}; output ${(fileSize / 1048576).toFixed(2)} MB`
-        );
+        // If the subtitle worker is still translating/transcribing, wait here.
+        subtitles = await subtitlePromise;
+        throwIfAborted(signal);
 
         permanentId = randomUUID();
-
         const r2Key = `videos/${permanentId}.mp4`;
 
-        // ========================================
-        // 4. SUBTITLE CONVERSION
-        // ========================================
-
-        sub1Vtt = convertSrtToVtt(subtitle1);
-
-        sub2Vtt = convertSrtToVtt(subtitle2);
-
-        // ========================================
-        // 5. R2 VIDEO UPLOAD
-        // ========================================
-
-        updateStatus(
-            'Uploading video to Cloudflare R2',
-            66,
-            {
-                detail: 'Preparing upload'
-            }
-        );
-
-        await uploadR2(
-            outPath,
-            r2Key,
-            'video/mp4',
-
-            (loaded, totalBytes, speed) => {
-
-                updateStatus(
-                    'Uploading video to Cloudflare R2',
-
-                    totalBytes
-                        ? 66 + 17 * loaded / totalBytes
-                        : null,
-
-                    {
-                        loadedBytes: loaded,
-                        totalBytes,
-                        speed
-                    }
-                );
-
-            }
-        );
-
-        updateStatus(
-            'R2 video upload complete',
-            84
-        );
-
-        // ========================================
-        // 6. SUBTITLE UPLOAD
-        // ========================================
-
-        const subtitleTasks = [
-
-            {
-                file: sub1Vtt,
-                key: `subtitles/${permanentId}_sin.vtt`,
-                label: 'Sinhala subtitle'
-            },
-
-            {
-                file: sub2Vtt,
-                key: `subtitles/${permanentId}_eng.vtt`,
-                label: 'English subtitle'
-            }
-
-        ].filter(item =>
-            item.file && fs.existsSync(item.file)
-        );
-
-        for (
-            let i = 0;
-            i < subtitleTasks.length;
-            i++
-        ) {
-
-            const task = subtitleTasks[i];
-
+        // 4. Upload video
+        updateStatus('Uploading video to Cloudflare R2', 66, { detail: 'Preparing upload' });
+        await uploadR2(outPath, r2Key, 'video/mp4', (loaded, totalBytes, speed) => {
             updateStatus(
-                `Uploading ${task.label}`,
-                84 + (
-                    i / Math.max(1, subtitleTasks.length)
-                ) * 4
+                'Uploading video to Cloudflare R2',
+                totalBytes ? 66 + 17 * loaded / totalBytes : null,
+                { loadedBytes: loaded, totalBytes, speed }
             );
+        }, signal);
 
-            await uploadR2(
-                task.file,
-                task.key,
-                'text/vtt',
+        updateStatus('R2 video upload complete', 84);
 
-                (loaded, totalBytes, speed) => {
+        // 5. Upload only subtitles that passed cue/timestamp/text validation.
+        const subtitleTasks = [
+            { file: subtitles?.sinVtt, key: `subtitles/${permanentId}_sin.vtt`, label: 'Sinhala subtitle' },
+            { file: subtitles?.engVtt, key: `subtitles/${permanentId}_eng.vtt`, label: 'English subtitle' }
+        ].filter(item => {
+            if (!item.file || !fs.existsSync(item.file)) return false;
+            const validation = validateSubtitleFile(item.file);
+            if (!validation.valid) {
+                console.warn(`Skipping ${item.label}: ${validation.reason}`);
+                return false;
+            }
+            return true;
+        });
 
-                    const base =
-                        84 + (
-                            i / Math.max(1, subtitleTasks.length)
-                        ) * 4;
-
-                    updateStatus(
-                        `Uploading ${task.label}`,
-
-                        totalBytes
-                            ? base + (
-                                4 * (loaded / totalBytes) /
-                                Math.max(1, subtitleTasks.length)
-                            )
-                            : null,
-
-                        {
-                            loadedBytes: loaded,
-                            totalBytes,
-                            speed
-                        }
-                    );
-
-                }
-            );
-
+        for (let index = 0; index < subtitleTasks.length; index++) {
+            throwIfAborted(signal);
+            const task = subtitleTasks[index];
+            const base = 84 + (index / Math.max(1, subtitleTasks.length)) * 4;
+            updateStatus(`Uploading ${task.label}`, base);
+            await uploadR2(task.file, task.key, 'text/vtt', (loaded, totalBytes, speed) => {
+                updateStatus(
+                    `Uploading ${task.label}`,
+                    totalBytes ? base + 4 * (loaded / totalBytes) / Math.max(1, subtitleTasks.length) : null,
+                    { loadedBytes: loaded, totalBytes, speed }
+                );
+            }, signal);
         }
 
-        // ========================================
-        // 7. TELEGRAM UPLOAD
-        // ========================================
-
-        if (
-            fileSize < 1.95 * 1024 ** 3 &&
-            process.env.TG_BOT_TOKEN &&
-            process.env.TG_CHAT_ID
-        ) {
-
-            updateStatus(
-                'Preparing Telegram upload',
-                89
-            );
-
+        // 6. Telegram upload (optional)
+        if (fileSize < 1.95 * 1024 ** 3 && process.env.TG_BOT_TOKEN && process.env.TG_CHAT_ID) {
+            updateStatus('Preparing Telegram upload', 89);
             try {
-
                 try {
-
-                    execFileSync(
-                        'ffmpeg',
-
-                        [
-                            '-y',
-                            '-ss',
-                            '00:00:05',
-                            '-i',
-                            outPath,
-                            '-vframes',
-                            '1',
-                            '-vf',
-                            'scale=320:-2',
-                            '-q:v',
-                            '5',
-                            thumbPath
-                        ],
-
-                        {
-                            stdio: 'ignore'
-                        }
-                    );
-
+                    execFileSync('ffmpeg', [
+                        '-y', '-ss', '00:00:05', '-i', outPath,
+                        '-vframes', '1', '-vf', 'scale=320:-2', '-q:v', '5', thumbPath
+                    ], { stdio: 'ignore' });
                 } catch (_) {
                     // Thumbnail is optional.
                 }
 
-                const form = new FormData();
-
-                form.append(
-                    'chat_id',
-                    process.env.TG_CHAT_ID
-                );
-
-                form.append(
-                    'video',
-                    fs.createReadStream(outPath),
-                    {
-                        filename: `${permanentId}.mp4`,
-                        contentType: 'video/mp4'
-                    }
-                );
-
-                form.append(
-                    'caption',
-                    `🎬 ${title}\nID: ${permanentId}`
-                );
-
-                form.append(
-                    'supports_streaming',
-                    'true'
-                );
-
-                if (fs.existsSync(thumbPath)) {
-
-                    form.append(
-                        'thumbnail',
-                        fs.createReadStream(thumbPath)
-                    );
-
-                }
-
-                if (duration > 0) {
-
-                    form.append(
-                        'duration',
-                        String(Math.round(duration))
-                    );
-
-                }
-
-                const tgUrl =
-                    process.env.TG_API_BASE_URL ||
-                    'http://localhost:8081';
-
+                const form = makeTelegramForm({ title, permanentId, outPath, thumbPath, duration });
+                const tgUrl = process.env.TG_API_BASE_URL || 'http://localhost:8081';
                 const tgRes = await axios.post(
-
                     `${tgUrl}/bot${process.env.TG_BOT_TOKEN}/sendVideo`,
-
                     form,
-
                     {
                         headers: form.getHeaders(),
-
                         maxBodyLength: Infinity,
-
                         maxContentLength: Infinity,
-
                         timeout: 0,
-
+                        signal,
                         onUploadProgress: event => {
-
-                            updateStatus(
-                                'Uploading to Telegram',
-
-                                event.total
-                                    ? 89 + 8 * event.loaded / event.total
-                                    : null,
-
-                                {
-                                    loadedBytes: event.loaded,
-                                    totalBytes: event.total || null
-                                }
-                            );
-
+                            updateStatus('Uploading to Telegram', event.total ? 89 + 8 * event.loaded / event.total : null, {
+                                loadedBytes: event.loaded,
+                                totalBytes: event.total || null
+                            });
                         }
-
-                    }
-
-                );
-
-                telegramFileId =
-                    tgRes.data?.result?.video?.file_id ||
-                    null;
-
-                updateStatus(
-                    'Telegram upload complete',
-                    97
-                );
-
-            } catch (e) {
-
-                console.error(
-                    'Telegram upload failed:',
-                    e.response?.data?.description || e.message
-                );
-
-                updateStatus(
-                    'Telegram upload failed — continuing with database sync',
-                    97,
-                    {
-                        detail:
-                            e.response?.data?.description ||
-                            e.message
                     }
                 );
 
+                telegramFileId = tgRes.data?.result?.video?.file_id || null;
+                updateStatus('Telegram upload complete', 97);
+            } catch (error) {
+                if (isAbortError(error, signal)) throw error;
+                console.error('Telegram upload failed:', error.response?.data?.description || error.message);
+                updateStatus('Telegram upload failed — continuing with database sync', 97, {
+                    detail: error.response?.data?.description || error.message
+                });
             }
-
         } else {
-
             updateStatus(
-
                 fileSize >= 1.95 * 1024 ** 3
                     ? 'Telegram skipped (file exceeds configured size limit)'
                     : 'Telegram not configured — skipped',
-
                 97
-
-            );
-
-        }
-
-        // ========================================
-        // 8. DATABASE SYNC
-        // ========================================
-
-        updateStatus(
-            'Syncing video record to database',
-            98
-        );
-
-        const syncUrl =
-            `${process.env.CF_API_URL || 'https://tipiz.moviezonee.workers.dev'}/api/vps/sync`;
-
-        const syncRes = await axios.post(
-
-            syncUrl,
-
-            {
-                uuid: permanentId,
-                title,
-                r2_key: r2Key,
-                telegram_file_id: telegramFileId,
-                source_type: 'r2'
-            },
-
-            {
-                headers: {
-                    Authorization:
-                        `Bearer ${process.env.CF_VPS_API_KEY}`
-                },
-
-                timeout: 60000
-            }
-
-        );
-
-        if (
-            syncRes.status < 200 ||
-            syncRes.status >= 300
-        ) {
-            throw new Error(
-                `Database sync failed with HTTP ${syncRes.status}`
             );
         }
 
-        console.log(
-            `[Job Completed] ${title} (${permanentId})`
-        );
+        // 7. Database sync
+        throwIfAborted(signal);
+        updateStatus('Syncing video record to database', 98);
+        const syncUrl = `${process.env.CF_API_URL || 'https://tipiz.moviezonee.workers.dev'}/api/vps/sync`;
+        const syncRes = await axios.post(syncUrl, {
+            uuid: permanentId,
+            title,
+            r2_key: r2Key,
+            telegram_file_id: telegramFileId,
+            source_type: 'r2'
+        }, {
+            headers: { Authorization: `Bearer ${process.env.CF_VPS_API_KEY}` },
+            timeout: 60000,
+            signal
+        });
+
+        if (syncRes.status < 200 || syncRes.status >= 300) {
+            throw new Error(`Database sync failed with HTTP ${syncRes.status}`);
+        }
 
         completed = true;
+        console.log(`[Job Completed] ${title} (${permanentId})`);
 
         return {
             permanentId,
             r2Key,
-            telegramFileId
+            telegramFileId,
+            subtitlesUploaded: subtitleTasks.map(task => task.key)
         };
 
-    } catch (err) {
-
-        console.error(
-            `[Job Failed] ${title}:`,
-            err.message
-        );
-
-        throw err;
+    } catch (error) {
+        if (isAbortError(error, signal)) {
+            const cancelled = new Error('Job was cancelled by an administrator.');
+            cancelled.name = 'AbortError';
+            cancelled.code = 'ABORT_ERR';
+            throw cancelled;
+        }
+        console.error(`[Job Failed] ${title}:`, error.stack || error.message);
+        throw error;
 
     } finally {
-
-        // ========================================
-        // 9. CLEANUP
-        // ========================================
-
-        const cleanup = [
-            rawPath,
-            outPath,
-            thumbPath
-        ];
-
-        // Failed job retry එකට subtitles තබාගන්නවා.
-        if (completed) {
-
-            cleanup.push(
-                subtitle1,
-                subtitle2
-            );
-
-            if (
-                subtitle1 &&
-                sub1Vtt &&
-                subtitle1 !== sub1Vtt
-            ) {
-                cleanup.push(sub1Vtt);
-            }
-
-            if (
-                subtitle2 &&
-                sub2Vtt &&
-                subtitle2 !== sub2Vtt
-            ) {
-                cleanup.push(sub2Vtt);
-            }
-
+        // If the video path failed before subtitles finished, stop the parallel
+        // AI task and wait for its subprocesses to exit before deleting files.
+        if (!completed && subtitleController && !subtitleController.signal.aborted) {
+            subtitleController.abort();
         }
-
-        for (const file of cleanup) {
-
-            if (file && fs.existsSync(file)) {
-
-                try {
-
-                    fs.unlinkSync(file);
-
-                } catch (e) {
-
-                    console.error(
-                        `Cleanup failed for ${file}:`,
-                        e.message
-                    );
-
+        if (unlinkSubtitleAbort) unlinkSubtitleAbort();
+        if (subtitlePromise && !subtitles) {
+            try {
+                subtitles = await subtitlePromise;
+            } catch (subtitleError) {
+                if (!isAbortError(subtitleError, signal)) {
+                    console.warn('Subtitle task ended during cleanup:', subtitleError.message);
                 }
-
             }
-
         }
 
+        const cleanup = [rawPath, outPath, thumbPath, subtitles?.audioPath];
+
+        // Keep original user-uploaded subtitles after a failure so a retry can
+        // reuse them. Generated artifacts and audio are always disposable.
+        if (subtitles?.generatedFiles) cleanup.push(...subtitles.generatedFiles);
+
+        if (completed) cleanup.push(subtitle1, subtitle2);
+
+        for (const file of new Set(cleanup.filter(Boolean))) {
+            try {
+                if (fs.existsSync(file) && fs.statSync(file).isFile()) fs.unlinkSync(file);
+            } catch (error) {
+                console.error(`Cleanup failed for ${file}:`, error.message);
+            }
+        }
     }
-
 }
-
-// ========================================
-// EXPORT
-// ========================================
 
 module.exports = {
     processVideo,
-    convertSrtToVtt
+    convertSrtToVtt,
+    validateSubtitleFile
 };
