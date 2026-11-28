@@ -28,6 +28,10 @@ const {
     randomUUID
 } = require('crypto');
 
+const {
+    generateAiSubtitles
+} = require('./ai-subtitle');
+
 // ========================================
 // CLOUDFLARE R2
 // ========================================
@@ -429,6 +433,14 @@ async function processVideo(jobData) {
     let sub1Vtt = null;
     let sub2Vtt = null;
 
+    // AI-generated subtitle files are tracked separately for safe cleanup.
+    let aiSubtitle1 = null;
+    let aiSubtitle2 = null;
+    let aiSubtitlePromise = null;
+    let aiSubtitleError = null;
+    let subtitle1Path = subtitle1;
+    let subtitle2Path = subtitle2;
+
     let permanentId = null;
     let telegramFileId = null;
 
@@ -572,7 +584,60 @@ async function processVideo(jobData) {
         let mode;
 
         // ========================================
-        // 3. CONVERSION
+        // 3. START AI SUBTITLES IN PARALLEL
+        // ========================================
+
+        const hasSubtitleFile = file => {
+            if (!file || !fs.existsSync(file)) return false;
+            try {
+                return fs.statSync(file).isFile() && fs.statSync(file).size > 0;
+            } catch (_) {
+                return false;
+            }
+        };
+
+        const needSinhala = !hasSubtitleFile(subtitle1Path);
+        const needEnglish = !hasSubtitleFile(subtitle2Path);
+
+        if (needSinhala || needEnglish) {
+            if (!audio) {
+                throw new Error('No audio stream found; cannot generate AI subtitles.');
+            }
+
+            const aiPrefix = path.join(tempDir, `ai_${id}`);
+
+            updateStatus(
+                'Starting AI subtitles alongside video conversion',
+                null,
+                {
+                    detail: 'Whisper Medium local CPU + NLLB Sinhala translation'
+                }
+            );
+
+            // Start now, against the original downloaded file. This promise runs
+            // while the MP4 conversion/copy is happening below.
+            aiSubtitlePromise = generateAiSubtitles(
+                rawPath,
+                aiPrefix,
+                (label, progress, meta) => updateStatus(label, progress, meta)
+            ).then(generated => {
+                aiSubtitle1 = generated.sinhalaSrt;
+                aiSubtitle2 = generated.englishSrt;
+
+                // Preserve any subtitle that was already supplied. Only fill
+                // missing subtitle slots with the AI-generated counterpart.
+                if (needSinhala) subtitle1Path = generated.sinhalaSrt;
+                if (needEnglish) subtitle2Path = generated.englishSrt;
+
+                return generated;
+            }).catch(error => {
+                aiSubtitleError = error;
+                return null;
+            });
+        }
+
+        // ========================================
+        // 4. CONVERSION
         // ========================================
 
         if (isMp4 && isH264 && isAacLc) {
@@ -622,7 +687,7 @@ async function processVideo(jobData) {
                     '-c:v',
                     'libx264',
                     '-preset',
-                    'fast',
+                    'ultrafast',
                     '-crf',
                     '23',
                     '-threads',
@@ -678,12 +743,29 @@ async function processVideo(jobData) {
         const r2Key = `videos/${permanentId}.mp4`;
 
         // ========================================
-        // 4. SUBTITLE CONVERSION
+        // 5. WAIT FOR AI SUBTITLES (IF STARTED)
         // ========================================
 
-        sub1Vtt = convertSrtToVtt(subtitle1);
+        if (aiSubtitlePromise) {
+            updateStatus(
+                'Waiting for parallel AI subtitle generation',
+                65,
+                { detail: 'Video conversion has finished; finishing subtitle generation' }
+            );
 
-        sub2Vtt = convertSrtToVtt(subtitle2);
+            await aiSubtitlePromise;
+
+            if (aiSubtitleError) {
+                throw new Error(`AI subtitle generation failed: ${aiSubtitleError.message}`);
+            }
+        }
+
+        // ========================================
+        // 6. SUBTITLE CONVERSION
+        // ========================================
+
+        sub1Vtt = convertSrtToVtt(subtitle1Path);
+        sub2Vtt = convertSrtToVtt(subtitle2Path);
 
         // ========================================
         // 5. R2 VIDEO UPLOAD
@@ -1043,7 +1125,11 @@ async function processVideo(jobData) {
         const cleanup = [
             rawPath,
             outPath,
-            thumbPath
+            thumbPath,
+            aiSubtitle1,
+            aiSubtitle2,
+            aiSubtitle1 ? `${aiSubtitle1}.vtt` : null,
+            aiSubtitle2 ? `${aiSubtitle2}.vtt` : null
         ];
 
         // Failed job retry එකට subtitles තබාගන්නවා.
